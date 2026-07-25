@@ -1,0 +1,18 @@
+{
+  "name": "salem-mall-bi-backend",
+  "version": "1.0.0",
+  "description": "DuckDB-backed backend that ingests a daily CSV/XLSX upload and serves the Salem Mall BI dashboard on Railway.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "duckdb": "^1.4.4",
+    "express": "^4.22.2",
+    "multer": "^2.2.0",
+    "xlsx": "^0.18.5"
+  }
+}
