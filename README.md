@@ -149,27 +149,49 @@ it survives redeploys (as long as the Volume itself isn't deleted) and
 RDP into the HO server (the one iTrade exports to) and do this there, not on
 your own PC:
 
-1. Install Python if it isn't already there, then:
+### Installing Python on the HO server
+
+Easiest is `winget install Python.Python.3.12` in an elevated Command Prompt
+(built into Windows 10/11, no browser needed) — close and reopen the
+terminal afterward so it picks up the updated PATH. Otherwise, download the
+installer from [python.org/downloads](https://www.python.org/downloads/) and
+run it, ticking **"Add python.exe to PATH"** on the first screen (easy to
+miss).
+
+Afterward, verify with `python --version`. If that says "not recognized" but
+double-clicking a `.py` file still runs it fine, try `py --version` instead
+— the `py` launcher is registered separately from `python` itself and is
+usually more reliable. **This mismatch matters a lot for what follows**: a
+Windows Scheduled Task doesn't behave like double-clicking or typing a
+command yourself (see the note in step 5 below) — the scripts in this repo
+are written assuming `py` is what works, not necessarily `python`.
+
+1. Install Python if it isn't already there (see "Installing Python on the
+   HO server" below — there's a specific gotcha worth reading first), then:
    ```
-   pip install requests
+   pip install requests requests-toolbelt
    ```
-2. Copy this folder's `upload_daily.py` and `create_scheduled_task.bat` onto
-   the HO server (anywhere is fine — e.g. `C:\iTrade\bi-upload\`).
-3. Open `upload_daily.py` and edit the values at the top:
+2. Copy this folder's `upload_daily.py`, `delete_daily_export.py`,
+   `upload_config.example.py`, `create_scheduled_task.bat`, and
+   `create_delete_task.bat` onto the HO server (anywhere is fine — e.g.
+   `C:\iTrade\bi-upload\`).
+3. Copy `upload_config.example.py` to `upload_config.py` (same folder) and
+   fill in the two values inside it:
    ```python
-   FOLDER = r"C:\iTrade\SALESALLBRANCHES"
-   FILENAME_PATTERN = "Sales_All_Branches_{date}.csv"   # already matches your export's naming
    SERVER_URL = "https://salem-mall-bi-production.up.railway.app"
    API_KEY = "the-same-string-you-put-in-Railway's-API_KEY-variable"
    ```
-   `FOLDER` and `FILENAME_PATTERN` already match what's in
-   `C:\iTrade\SALESALLBRANCHES` — only `SERVER_URL` and `API_KEY` should need
-   changing, unless the export ever gets renamed.
+   `upload_config.py` is deliberately **not** part of the repo (it's
+   gitignored) — it holds a real secret, and this keeps that secret from
+   ever ending up in git history. `FOLDER`/`FILENAME_PATTERN` inside
+   `upload_daily.py` itself already match `C:\iTrade\SALESALLBRANCHES` and
+   normally don't need touching.
 4. Test it manually:
    ```
-   python upload_daily.py
+   py upload_daily.py
    ```
-   You should see `Upload succeeded: N rows ingested in X.Xs`. Refresh your
+   You should see `Upload succeeded: N rows ingested in X.Xs`, and the same
+   line appended to a new `upload_log.txt` next to the script. Refresh your
    Railway dashboard URL — your data should now load automatically. If
    today's dated file isn't there yet, it'll say so and fall back to the
    newest one it can find — don't ignore that warning, it means the iTrade
@@ -181,14 +203,31 @@ your own PC:
    the time this runs, and well clear of ~7am when people start checking the
    dashboard.
 
+   **Important — a scheduled run is not the same as running it yourself:**
+   Task Scheduler launches the script's "Program" (`py`) by looking it up
+   via **its own** process's PATH, which is often stale or different from an
+   interactive Command Prompt session's — so `python upload_daily.py`
+   working perfectly when you type it yourself does NOT guarantee the
+   scheduled task can find `python` too. This exact mismatch (works
+   manually, silently does nothing on schedule) is why the `.bat` files
+   here launch via the full path to the **`py` launcher**
+   (`%SystemRoot%\py.exe`) instead of bare `python` — `C:\Windows` is always
+   on every process's PATH, launcher included, regardless of how Python
+   itself was installed. After running the `.bat`, right-click the task in
+   Task Scheduler → **Run** once, then check `upload_log.txt` to confirm it
+   actually completed — don't just trust that registering the task worked.
+
    Prefer to do it by hand instead of the `.bat` file? Open **Task Scheduler
    → Create Basic Task** → Trigger: Daily at 05:00 → Action: **Start a
-   program** → Program: `python`, Arguments: `"C:\full\path\to\upload_daily.py"`.
+   program** → Program: `%SystemRoot%\py.exe`, Arguments:
+   `-3 "C:\full\path\to\upload_daily.py"`.
 
 6. Automate the cleanup: double-click `create_delete_task.bat` on the HO
    server. It registers a second job, `SalemMallBIDeleteExport`, that runs
-   `delete_daily_export.py` daily at **18:00** — well after the 05:00 upload,
-   so the file is already safely in Railway before it's removed. This keeps
+   `delete_daily_export.py` daily at **18:00** (also via the `py` launcher,
+   same reasoning as above) — well after the 05:00 upload, so the file is
+   already safely in Railway before it's removed, logging to
+   `delete_log.txt` next to the script. This keeps
    `C:\iTrade\SALESALLBRANCHES` from filling up with a new ~1GB file every
    day forever. It also cleans up any older leftover exports it finds, as a
    safety net if a previous day's cleanup was ever missed.
