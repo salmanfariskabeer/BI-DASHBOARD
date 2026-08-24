@@ -4,3 +4,6 @@ scratch/
 *.log
 __pycache__/
 *.pyc
+upload_config.py
+upload_log.txt
+delete_log.txt

@@ -64,7 +64,7 @@ const DIM_SQL = {
   day: "strftime(trandate, '%Y-%m-%d')",
 };
 const BASE_FILTER_DIMS = ['outlet', 'category', 'class_', 'supplier'];
-const METRIC_KEYS = ['sales', 'cost', 'gp', 'gppct', 'qty', 'count'];
+const METRIC_KEYS = ['sales', 'cost', 'gp', 'gppct', 'qty', 'count', 'daysSold'];
 
 function dimExpr(dim) {
   const expr = DIM_SQL[dim];
@@ -89,17 +89,22 @@ function buildWhere(filters, extra) {
   }
   return clauses.join(' AND ');
 }
-const SUM_SELECT = `SUM(SalesTotal)::DOUBLE AS sales, SUM(TotalCost)::DOUBLE AS cost, SUM(TotalQty)::DOUBLE AS qty, COUNT(*)::BIGINT AS count`;
+// daysSold = COUNT(DISTINCT trandate): how many distinct calendar days within
+// the filtered range had at least one sale for whatever's being grouped (an
+// item, a category, ...) -- a "how often does this actually sell" measure,
+// separate from count (row/line-item volume, which drives Avg Basket Value
+// and shouldn't be redefined to mean something else).
+const SUM_SELECT = `SUM(SalesTotal)::DOUBLE AS sales, SUM(TotalCost)::DOUBLE AS cost, SUM(TotalQty)::DOUBLE AS qty, COUNT(*)::BIGINT AS count, COUNT(DISTINCT trandate)::BIGINT AS daysSold`;
 function withDerived(row) {
   const sales = row.sales || 0, cost = row.cost || 0, gp = sales - cost;
-  return { sales, cost, gp, gppct: sales !== 0 ? gp / sales : 0, qty: row.qty || 0, count: Number(row.count) || 0 };
+  return { sales, cost, gp, gppct: sales !== 0 ? gp / sales : 0, qty: row.qty || 0, count: Number(row.count) || 0, daysSold: Number(row.daysSold) || 0 };
 }
 
 /* ============================================================
    INGEST
    ============================================================ */
-async function ingestFromCsv(csvPath) {
-  return ingestCsvInto(run, exec, csvPath, 'sales_current');
+async function ingestFromCsv(csvPath, targetTable, options) {
+  return ingestCsvInto(run, exec, csvPath, targetTable, options);
 }
 
 // XLSX: parsed with SheetJS (same header-detection idea as the old client-side
@@ -122,7 +127,7 @@ function csvEscapeCell(v) {
   const s = String(v);
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
-async function ingestFromXlsx(xlsxPath) {
+async function ingestFromXlsx(xlsxPath, targetTable) {
   const wb = XLSX.readFile(xlsxPath, { cellDates: true });
   const found = findDataSheetXlsx(wb);
   if (!found) throw new Error('Could not find a sheet containing a "trandate" column in this workbook.');
@@ -135,7 +140,7 @@ async function ingestFromXlsx(xlsxPath) {
   for (const row of rows) stream.write(headers.map((h) => csvEscapeCell(row[h])).join(',') + '\n');
   await new Promise((resolve, reject) => stream.end((err) => (err ? reject(err) : resolve())));
   try {
-    return await ingestFromCsv(csvPath);
+    return await ingestFromCsv(csvPath, targetTable);
   } finally {
     fs.unlink(csvPath, () => {});
   }
@@ -163,32 +168,58 @@ function requireKey(req, res, next) {
   next();
 }
 
-// Only guards the daily ingest, which authenticates with its own API_KEY —
-// registered before the password gate below so upload_daily.py on the HO
-// server never has to deal with a browser-style password prompt.
-app.post('/api/upload', requireKey, upload.single('file'), async (req, res) => {
+// Shared by both ingest routes below — only the target table differs.
+async function handleUpload(req, res, targetTable) {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded (expected multipart field "file")' });
-  const ext = (req.file.originalname.split('.').pop() || '').toLowerCase();
+  const name = req.file.originalname.toLowerCase();
+  const gzipped = name.endsWith('.gz');
+  const ext = (gzipped ? name.slice(0, -3) : name).split('.').pop() || '';
+
+  // Multer saves the upload under a random extensionless temp name, but
+  // DuckDB's CSV reader decides whether to gzip-decompress based on the
+  // file's *extension*, not just the explicit compression= option — so we
+  // give the temp file back its real extension before handing it to DuckDB.
+  const workPath = req.file.path + (gzipped ? '.csv.gz' : ext === 'csv' ? '.csv' : `.${ext}`);
+  fs.renameSync(req.file.path, workPath);
+
   const start = Date.now();
   try {
     let result;
-    if (ext === 'csv') result = await ingestFromCsv(req.file.path);
-    else if (ext === 'xlsx' || ext === 'xls') result = await ingestFromXlsx(req.file.path);
-    else return res.status(400).json({ error: 'Only .csv, .xlsx or .xls files are accepted' });
+    // Gzip is only supported for the raw-CSV path — DuckDB's CSV reader
+    // decompresses it directly, so a large upload transfers in a fraction of
+    // the time and bytes (large win on slower office links, where
+    // uncompressed transfers were hitting the edge's request timeout).
+    if (ext === 'csv') result = await ingestFromCsv(workPath, targetTable, { compressed: gzipped });
+    else if (!gzipped && (ext === 'xlsx' || ext === 'xls')) result = await ingestFromXlsx(workPath, targetTable);
+    else return res.status(400).json({ error: 'Only .csv, .csv.gz, .xlsx or .xls files are accepted' });
 
     const meta = {
-      filename: req.file.originalname, rows: result.kept, skipped: result.skipped,
+      filename: req.file.originalname, table: targetTable, rows: result.kept, skipped: result.skipped,
       uploadedAt: new Date().toISOString(), ingestMs: Date.now() - start,
     };
-    fs.writeFileSync(path.join(DATA_DIR, 'last_upload.json'), JSON.stringify(meta));
+    if (targetTable === 'sales_current') {
+      fs.writeFileSync(path.join(DATA_DIR, 'last_upload.json'), JSON.stringify(meta));
+    }
     res.json({ ok: true, ...meta });
   } catch (err) {
     console.error('Upload/ingest error:', err);
     res.status(500).json({ error: 'Ingest failed: ' + err.message });
   } finally {
-    fs.unlink(req.file.path, () => {});
+    fs.unlink(workPath, () => {});
   }
-});
+}
+
+// Only guards the daily ingest, which authenticates with its own API_KEY —
+// registered before the password gate below so upload_daily.py on the HO
+// server never has to deal with a browser-style password prompt.
+app.post('/api/upload', requireKey, upload.single('file'), (req, res) => handleUpload(req, res, 'sales_current'));
+
+// One-off historical loads (e.g. a full prior year) go into sales_history
+// instead of sales_current, so they never get wiped by the next daily
+// upload. Same auth, same gzip support, same size limits as /api/upload —
+// this exists so a large one-time load can go through the same proven HTTP
+// path instead of needing direct volume/DuckDB-file access.
+app.post('/api/upload-history', requireKey, upload.single('file'), (req, res) => handleUpload(req, res, 'sales_history'));
 
 // --- Password gate — everything below this line requires it. ---
 // A native browser Basic Auth prompt: simplest thing that actually blocks
@@ -253,8 +284,14 @@ app.post('/api/aggregate', async (req, res) => {
     const where = buildWhere(filters, extra);
     const metric = METRIC_KEYS.includes(sortMetric) ? sortMetric : 'sales';
     const dir = sortDir === 'asc' ? 'ASC' : 'DESC';
-    const orderExpr = metric === 'gp' ? '(sales - cost)'
-      : metric === 'gppct' ? '(CASE WHEN sales<>0 THEN (sales-cost)/sales ELSE 0 END)'
+    // Built from the raw SUM(...) expressions rather than the `sales`/`cost`
+    // aliases: those alias names collide with the `sales` view itself once
+    // used inside a compound expression like (sales - cost) — DuckDB's
+    // binder resolves the bare identifier to the FROM-clause relation (a
+    // STRUCT) instead of the SELECT-list alias, and errors. Referencing
+    // SUM(SalesTotal)/SUM(TotalCost) directly sidesteps the collision.
+    const orderExpr = metric === 'gp' ? '(SUM(SalesTotal) - SUM(TotalCost))'
+      : metric === 'gppct' ? '(CASE WHEN SUM(SalesTotal)<>0 THEN (SUM(SalesTotal)-SUM(TotalCost))/SUM(SalesTotal) ELSE 0 END)'
       : metric;
 
     const [grandRow] = await run(`SELECT ${SUM_SELECT} FROM sales WHERE ${where}`);

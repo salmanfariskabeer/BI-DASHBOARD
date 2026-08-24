@@ -60,8 +60,20 @@ const DATE_EXPR = (col) => `COALESCE(
 // decides whether that's a daily-replaced table or a one-time historical
 // load). `run`/`exec` are the same tiny DuckDB promise wrappers server.js and
 // load_history.js each define locally.
-async function ingestCsvInto(run, exec, csvPath, targetTable) {
-  const desc = await run(`DESCRIBE SELECT * FROM read_csv_auto(${esc(csvPath)}, sample_size=200000)`);
+// Pinning the dialect (delim/quote/escape/header) instead of leaving DuckDB
+// to sniff it avoids a failure seen on large gzip-compressed uploads: the
+// auto-sniffer's sampling appears to misdetect the dialect once a compressed
+// file gets big enough, even though the same file works fine uncompressed or
+// small. Every export from this source is plain comma-delimited with a
+// header row, so pinning these is safe and sidesteps that failure mode.
+async function ingestCsvInto(run, exec, csvPath, targetTable, options = {}) {
+  const compressionArg = options.compressed ? `, compression='gzip'` : '';
+  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false`;
+  // ignore_errors + strict_mode=false cover occasional malformed/non-UTF-8
+  // rows in the source export (seen in real data) — they're skipped rather
+  // than failing the whole ingest, consistent with how unparseable trandate
+  // rows are already dropped and reported via `skipped` below.
+  const desc = await run(`DESCRIBE SELECT * FROM read_csv_auto(${esc(csvPath)}, sample_size=200000, ignore_errors=true${dialectArgs}${compressionArg})`);
   const actualCols = desc.map((d) => d.column_name);
   const r = resolveColumns(actualCols);
   const sel = (canon) => (r[canon] ? `"${r[canon]}"` : 'NULL');
@@ -83,7 +95,7 @@ async function ingestCsvInto(run, exec, csvPath, targetTable) {
       TRY_CAST(${sel('TotalQty')} AS DOUBLE) AS TotalQty,
       TRY_CAST("${r.SalesTotal}" AS DOUBLE) AS SalesTotal,
       TRY_CAST(${sel('TotalCost')} AS DOUBLE) AS TotalCost
-    FROM read_csv_auto(${esc(csvPath)}, sample_size=200000, ignore_errors=true, all_varchar=false)
+    FROM read_csv_auto(${esc(csvPath)}, sample_size=200000, ignore_errors=true, all_varchar=false${dialectArgs}${compressionArg})
   `);
   const [{ total }] = await run(`SELECT count(*)::BIGINT AS total FROM ${stagingTable}`);
   const [{ kept }] = await run(`SELECT count(*)::BIGINT AS kept FROM ${stagingTable} WHERE trandate IS NOT NULL`);

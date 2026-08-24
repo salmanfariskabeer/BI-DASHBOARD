@@ -11,8 +11,11 @@ set TASK_NAME=SalemMallBIDeleteExport
 set TIME=18:00
 set SCRIPT_DIR=%~dp0
 
+REM See create_scheduled_task.bat for why this uses the full path to the "py"
+REM launcher instead of bare "python" -- Task Scheduler's own PATH lookup is
+REM what silently fails otherwise, even when running the script yourself works.
 schtasks /Create /TN "%TASK_NAME%" ^
-  /TR "python \"%SCRIPT_DIR%delete_daily_export.py\"" ^
+  /TR "\"%SystemRoot%\py.exe\" -3 \"%SCRIPT_DIR%delete_daily_export.py\"" ^
   /SC DAILY /ST %TIME% /F
 
 echo.

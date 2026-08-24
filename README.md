@@ -57,39 +57,90 @@ yet.
 
 | File | Purpose |
 |---|---|
-| `server.js` | Backend: ingests CSV/XLSX into DuckDB, serves the dashboard, answers every query |
+| `server.js` | Backend: serves the dashboard, the password gate, and every query API |
+| `ingest.js` | Shared CSV-ingestion logic used by both `server.js` and `load_history.js` |
+| `load_history.js` | One-time loader for historical data (e.g. all of 2025) into `sales_history` |
 | `package.json` | Node dependencies (Express, Multer, DuckDB, SheetJS) |
 | `public/index.html` | Your dashboard — KPIs/charts/pivot/reports now query the server instead of an in-browser array |
 | `upload_daily.py` | Runs on the HO server at 05:00, finds today's dated export and pushes it to Railway |
 | `create_scheduled_task.bat` | One-click helper to register the 05:00 upload task (run on the HO server) |
 | `delete_daily_export.py` | Runs on the HO server at 18:00, deletes the day's CSV(s) now that they're already in Railway |
 | `create_delete_task.bat` | One-click helper to register the 18:00 cleanup task (run on the HO server) |
-| `data/` | Local only — the DuckDB file lives here; on Railway this should be a mounted Volume (see below) |
+| `data/` | Local only, gitignored — the DuckDB file lives here; on Railway this should be a mounted Volume (see below) |
+
+### The two-table data model
+
+```
+sales_history   — loaded once via load_history.js (e.g. all of 2025)
+                  never touched by the daily upload
+sales_current   — replaced wholesale by every /api/upload (2026 onward,
+                  since the iTrade feed only contains 2026-01-01+ now)
+sales  (VIEW)   = sales_history UNION ALL sales_current
+                  every query in server.js reads from this — history and
+                  the daily feed are combined transparently, never overlap
+```
+
+This exists because the iTrade export changed to only cover 2026 onward,
+but the dashboard should still show 2025 for comparisons/MTD-YTD-style
+reports. `load_history.js` is a separate, one-time script (not on any
+schedule) specifically because historical files can be much bigger than a
+single day's export — the 2025 file was ~3GB / 12.77M rows, well past what
+you'd want going over HTTP through `/api/upload`.
 
 ---
 
 ## Part 1 — Deploy the backend + dashboard to Railway
 
-1. Push this folder to a new GitHub repo (or use the Railway CLI to deploy a
-   local folder directly — `railway up` from inside this folder works too).
-2. In Railway: **New Project → Deploy from GitHub repo** (or `railway up`).
-3. Railway auto-detects Node from `package.json` and runs `npm start`. No
+The code is already on GitHub at
+[`salmanfariskabeer/BI-DASHBOARD`](https://github.com/salmanfariskabeer/BI-DASHBOARD)
+(`main` branch) — you don't need to push it yourself.
+
+1. In Railway: **New Project → Deploy from GitHub repo** → pick `BI-DASHBOARD`.
+   (Or `railway up` from inside this folder if you'd rather deploy from a
+   local copy — either works, they're the same code.)
+2. Railway auto-detects Node from `package.json` and runs `npm start`. No
    extra build config needed. DuckDB's native binding compiles/installs
    automatically as part of `npm install` — no extra buildpack steps.
-4. In your Railway project → **Variables**, add:
+3. In your Railway project → **Variables**, add:
    - `API_KEY` = a long random string you make up, e.g. `openssl rand -hex 24`
      (this is the password the HO server uses to push data — keep it secret)
-5. Under **Settings → Networking**, generate a public domain. You'll get a
+   - `DASHBOARD_PASSWORD` = the password anyone opening the dashboard URL
+     needs to type in. Defaults to `13661366` if you don't set this — set it
+     explicitly if you want a different one, since the default is now public
+     (it's in this README).
+4. Under **Settings → Networking**, generate a public domain. You'll get a
    URL like `https://salem-mall-bi-production.up.railway.app` — **this is
-   the URL you share with your team.**
-6. **Add a Volume** (Settings → Volumes) mounted at, say, `/data`, and set an
+   the URL you share with your team**, alongside the password.
+5. **Add a Volume** (Settings → Volumes) mounted at, say, `/data`, and set an
    env var `DATA_DIR=/data`. This is more important here than it would be for
-   a plain file store — the DuckDB database lives on this volume, and without
-   it a redeploy wipes the ingested data until the next scheduled push.
+   a plain file store — the DuckDB database (both `sales_history` and
+   `sales_current`) lives on this volume, and without it a redeploy wipes
+   everything, including the 2025 history, until it's reloaded.
 
-Test it: visit the URL. You should see the empty state (it checks
-`/api/status`, finds nothing yet, and waits) — expected until Part 2 pushes
-real data.
+Test it: visit the URL. It'll prompt for the password (browser's native
+login box) — enter `DASHBOARD_PASSWORD`. After that you should see the empty
+state (it checks `/api/status`, finds nothing yet) — expected until history
+is loaded (below) and Part 2 starts pushing daily data.
+
+### Loading 2025 history onto Railway
+
+`load_history.js` needs direct access to the same DuckDB file the server
+uses, and DuckDB only allows one process to hold that file open at a time —
+so this can't run as a normal HTTP upload. Easiest path:
+
+1. Stop the Railway service (or scale it to 0) so nothing else has the
+   volume's database file open.
+2. Use `railway run node load_history.js "<path>"` with the 2025 CSV
+   accessible to that command (e.g. via a Railway shell/SFTP into the volume,
+   or temporarily via `railway volume` tooling) — or, if that's awkward,
+   run `load_history.js` locally against a copy of the Railway volume's
+   `warehouse.duckdb`, then upload the resulting file back to the volume.
+3. Restart the service. `/api/status` should now show ~12.77M rows and a
+   2025-01-01 to 2025-12-31 date range even before any daily upload happens.
+
+This is a one-time step — once `sales_history` is populated on the volume,
+it survives redeploys (as long as the Volume itself isn't deleted) and
+`upload_daily.py` never touches it.
 
 ---
 
@@ -170,18 +221,30 @@ re-check without a full page reload.
   instead of holding rows in the browser. Calculated fields, saved layouts,
   and CSV/Excel export of whatever's on screen all work exactly as before —
   those only ever operated on small aggregated results, not raw rows.
-- **This holds one snapshot** (today's file), not day-by-day history. MTD/YTD
-  and custom-date-variance reports work by re-querying that one table with
-  different date ranges — no separate history store needed for those. If you
-  later want "compare to a date range that's no longer in today's export"
-  (e.g. true historical retention beyond what your source system keeps),
-  that needs the server to accumulate uploads over time rather than replace
-  the table each day — a bigger step, worth doing as a follow-up if it comes
-  up.
-- **Security**: `/api/upload` is protected by the `API_KEY` header. The
-  dashboard itself has no login — anyone with the URL can view it. If you
-  need to restrict *viewing* too, that's a separate step (real auth) from
-  what's built here.
+- **History vs. daily snapshot**: `sales_current` holds one snapshot (the
+  latest daily file, 2026 onward) — `sales_history` is what carries 2025 and
+  isn't touched by daily uploads. MTD/YTD and custom-date-variance reports
+  re-query the combined `sales` view with different date ranges, so they
+  work across the 2025/2026 boundary without any extra work. If you ever
+  want day-by-day historical retention *within* 2026 too (e.g. "what did
+  today's file say last Tuesday"), that's a bigger step — the daily job
+  would need to accumulate instead of replace `sales_current`.
+- **Security**: the dashboard and all read APIs require the
+  `DASHBOARD_PASSWORD` (HTTP Basic Auth — browsers show their native login
+  prompt). `/api/upload` is separately protected by its own `API_KEY` header
+  and is deliberately *not* behind the password gate, since `upload_daily.py`
+  on the HO server is a script, not someone typing a password. This is a
+  password lock, not full user accounts — anyone with the one password sees
+  everything; there's no per-user access control.
+- **2025 data quality flag**: the loaded 2025 history shows total cost
+  running at ~2.5x total sales (a -147% gross margin for the year), driven
+  almost entirely by the SUPERMARKET and FRESH FOOD categories. This was
+  verified against the raw file (row counts match exactly, sample rows are
+  internally consistent with the file's own `Profit` column) — it's what's
+  actually in the export, not an ingestion bug. Worth confirming with
+  whoever owns the iTrade export whether `TotalCost` includes something
+  beyond COGS for those categories before trusting margin numbers from 2025
+  in front of anyone.
 - **File size**: Multer is capped at 2GB per upload here — comfortably above
   a ~1GB daily export. Raise `upload`'s `limits.fileSize` in `server.js` if
   you ever need more.

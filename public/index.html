@@ -171,12 +171,15 @@ body{min-height:100vh;}
 @media(max-width:900px){.chart-row{grid-template-columns:1fr;}}
 .chart-card{
   background:var(--card); border:1px solid var(--line); padding:14px 16px;
+  min-width:0; /* grid items default to min-width:auto, which lets an oversized
+                 canvas drag its whole column (and any sibling) wider than the
+                 viewport — this keeps the card shrinkable to its column's width */
 }
 .chart-card h3{
   font-family:var(--serif); font-size:14.5px; margin:0 0 10px; color:var(--ink); font-weight:700;
   border-bottom:1px solid var(--line); padding-bottom:8px;
 }
-.chart-card canvas{max-height:260px;}
+.chart-card canvas{max-height:260px; max-width:100%;}
 
 /* ---------- Pivot Explorer ---------- */
 .pivot-section{
@@ -192,11 +195,12 @@ body{min-height:100vh;}
 /* ---------- Tabs ---------- */
 .tab-bar{
   display:flex; gap:2px; margin-bottom:18px; border-bottom:2px solid var(--ink);
+  overflow-x:auto; -webkit-overflow-scrolling:touch;
 }
 .tab-btn{
   border:none; background:var(--paper-2); color:var(--text-dim);
   padding:10px 20px; font-size:13px; font-family:var(--sans); font-weight:600;
-  cursor:pointer; letter-spacing:0.3px;
+  cursor:pointer; letter-spacing:0.3px; flex-shrink:0; white-space:nowrap;
 }
 .tab-btn:hover{ background:var(--brass-dim); color:var(--ink); }
 .tab-btn.active{ background:var(--ink); color:#fff; }
@@ -221,13 +225,48 @@ body{min-height:100vh;}
   font-size:11.5px; color:var(--green); font-style:italic; font-family:var(--sans);
 }
 
-/* ---------- Field panel + drag/drop zones ---------- */
-.builder-grid{
-  display:grid; grid-template-columns: 260px 1fr; gap:0; border-bottom:1px solid var(--line);
+/* ---------- Pivot workspace: left sidebar (fields/zones/controls), right table ---------- */
+.pivot-workspace{
+  display:grid; grid-template-columns:340px 1fr; gap:0; align-items:start;
 }
-@media(max-width:900px){ .builder-grid{ grid-template-columns:1fr; } }
+@media(max-width:900px){ .pivot-workspace{ grid-template-columns:1fr; } }
+.pivot-sidebar{
+  border-right:1px solid var(--line); border-bottom:1px solid var(--line);
+  display:flex; flex-direction:column; min-width:0;
+}
+@media(max-width:900px){ .pivot-sidebar{ border-right:none; } }
+.pivot-main{ min-width:0; padding-top:14px; }
+.pivot-main-toolbar{
+  display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:0 18px 12px;
+}
+.toolbar-btn{
+  border:1px solid var(--ink); color:var(--ink); background:#fff;
+  padding:6px 12px; font-size:11.5px; cursor:pointer; border-radius:2px; font-family:var(--sans);
+}
+.toolbar-btn:hover, .toolbar-btn.active{ background:var(--ink); color:#fff; }
+.density-control{ display:flex; align-items:center; gap:6px; }
+.density-label{ font-size:10.5px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); font-weight:700; }
+.density-btn{
+  border:1px solid var(--line); background:#fff; color:var(--text-dim);
+  width:26px; height:26px; font-size:11.5px; cursor:pointer; border-radius:2px; font-family:var(--sans); font-weight:600;
+}
+.density-btn:hover{ border-color:var(--brass); color:var(--ink); }
+.density-btn.active{ background:var(--ink); border-color:var(--ink); color:#fff; }
+
+/* Full-width mode: collapse the sidebar so the table gets the whole row */
+.pivot-workspace.full-width{ grid-template-columns:1fr; }
+.pivot-workspace.full-width .pivot-sidebar{ display:none; }
+
+/* Table density — applied to the stable wrapper (not the <table> itself,
+   which gets fully rebuilt on every render) so the choice survives re-renders */
+.pivot-table-wrap.density-compact table.pivot th, .pivot-table-wrap.density-compact table.pivot td{ padding:4px 8px; font-size:11px; }
+.pivot-table-wrap.density-large table.pivot th, .pivot-table-wrap.density-large table.pivot td{ padding:11px 14px; font-size:14px; }
+
+/* ---------- Field panel + drag/drop zones ---------- */
 .field-panel{
-  padding:14px 18px; border-right:1px solid var(--line); display:flex; flex-direction:column; gap:16px;
+  padding:14px 18px; display:flex; flex-direction:column; gap:16px;
+  border-bottom:1px solid var(--line);
 }
 .field-panel-col h4{
   font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); font-weight:700; margin:0 0 8px;
@@ -242,6 +281,12 @@ body{min-height:100vh;}
 .field-chip:active{ cursor:grabbing; }
 .field-chip.value-chip{ border-color:var(--green); color:var(--green); }
 .field-chip.calc-chip{ border-style:dashed; }
+/* Already placed in a zone — faded and inert instead of looking identically
+   available in both the source list and the zone at once. */
+.field-chip.in-use{
+  opacity:0.35; cursor:not-allowed; background:var(--paper-2); border-style:dashed;
+}
+.field-chip.in-use:active{ cursor:not-allowed; }
 .chip-del{ margin-left:6px; color:var(--brick); font-weight:700; cursor:pointer; }
 
 .add-calc-btn{
@@ -334,12 +379,13 @@ table.pivot td.total-group{ font-weight:600; background:#FBF8EF; }
 
 .pivot-controls{
   display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end;
-  padding:14px 18px; border-bottom:1px solid var(--line);
+  padding:14px 18px;
 }
 .pivot-controls .filter-group select, .pivot-controls .filter-group input[type=number]{
   min-width:140px;
 }
 .pivot-controls .filter-group input[type=number]{width:80px; min-width:80px;}
+.pivot-sidebar .pivot-controls .csv-btn, .pivot-sidebar .pivot-controls .xlsx-btn, .pivot-sidebar .pivot-controls .print-btn{ flex:1 1 100%; }
 
 .pivot-table-wrap{
   overflow-x:auto; padding:0 18px 18px;
@@ -358,16 +404,26 @@ table.pivot th.rowhead, table.pivot td.rowhead{text-align:left;}
 table.pivot th:hover{background:var(--ink-2);}
 table.pivot td{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--text);}
 table.pivot tr.total-row td{font-weight:700; background:var(--paper-2); border-top:2px solid var(--ink);}
-table.pivot tr.level-0 td.rowhead{font-weight:700;}
-table.pivot tr.level-1 td.rowhead{padding-left:26px; color:var(--text-dim);}
-table.pivot tr.level-2 td.rowhead{padding-left:44px; color:var(--text-dim); font-size:12px;}
-table.pivot tr.level-3 td.rowhead{padding-left:62px; color:var(--text-dim); font-size:11.5px;}
-table.pivot tr.level-4 td.rowhead{padding-left:80px; color:var(--text-dim); font-size:11px;}
+/* Standard tiered pivot shading: each nesting level gets a progressively
+   lighter band (darkest/boldest at the top grouping level, fading to plain
+   white at leaf rows) plus a left accent guide — the conventional way
+   spreadsheet/BI pivot tables make hierarchy scannable at a glance, on top
+   of (not instead of) the indentation, which now lives in the row's actual
+   text (see rowIndent()) so it survives copy-paste too. */
+table.pivot tr.level-0 td{ background:rgba(20,33,61,0.07); }
+table.pivot tr.level-0 td.rowhead{ font-weight:700; border-left:3px solid var(--ink); }
+table.pivot tr.level-1 td{ background:rgba(20,33,61,0.035); }
+table.pivot tr.level-1 td.rowhead{ color:var(--text-dim); border-left:3px solid rgba(20,33,61,0.4); }
+table.pivot tr.level-2 td{ background:rgba(20,33,61,0.015); }
+table.pivot tr.level-2 td.rowhead{ color:var(--text-dim); font-size:12px; border-left:3px solid rgba(20,33,61,0.22); }
+table.pivot tr.level-3 td.rowhead{ color:var(--text-dim); font-size:11.5px; border-left:3px solid rgba(20,33,61,0.1); }
+table.pivot tr.level-4 td.rowhead{ color:var(--text-dim); font-size:11px; }
 table.pivot tr.item-row td.rowhead{ color:#7A0C1E; font-weight:600; }
 table.pivot tr:hover td{background:#FBF8EF;}
 table.pivot tr.total-row:hover td{background:var(--paper-2);}
 .expand-toggle{
   display:inline-block; width:14px; color:var(--brass); font-weight:700; cursor:pointer;
+  user-select:none; /* keep the ▸/▾ glyph out of copy-pasted text */
 }
 .show-more-row td{
   text-align:left; color:var(--brass); font-style:italic; cursor:pointer; font-family:var(--sans); font-size:12px;
@@ -385,6 +441,11 @@ table.pivot tr.total-row:hover td{background:var(--paper-2);}
   padding:6px 12px; font-size:11.5px; cursor:pointer; border-radius:2px; font-family:var(--sans);
 }
 .xlsx-btn:hover{background:var(--brass); color:#fff;}
+.print-btn{
+  border:1px solid var(--ink); color:var(--ink); background:#fff;
+  padding:6px 12px; font-size:11.5px; cursor:pointer; border-radius:2px; font-family:var(--sans);
+}
+.print-btn:hover{background:var(--ink); color:#fff;}
 
 .footer-note{
   text-align:center; font-size:11px; color:var(--text-dim); margin-top:10px; font-family:var(--mono); padding-bottom:30px;
@@ -415,10 +476,150 @@ table.pivot tr.total-row:hover td{background:var(--paper-2);}
 .legend-dot.above{ background:var(--green); }
 .legend-dot.below{ background:var(--brick); }
 #reportOutput table.pivot{ margin:0 18px 18px; width:calc(100% - 36px); }
-#reportOutput{ padding-bottom:6px; }
-tr.above-avg td.rowhead{ border-left:3px solid var(--green); }
-tr.below-avg td.rowhead{ border-left:3px solid var(--brick); }
+#reportOutput{ padding-bottom:6px; overflow-x:auto; }
+/* Matches the specificity of the level-N border-left rules above (table.pivot
+   tr.level-N td.rowhead) and comes after them in source order, so the
+   above/below-average colour — a more specific, intentional signal on the
+   Margin Comparison / period-comparison reports — always wins over the
+   generic per-level accent. */
+table.pivot tr.above-avg td.rowhead{ border-left:3px solid var(--green); }
+table.pivot tr.below-avg td.rowhead{ border-left:3px solid var(--brick); }
 tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
+
+/* ---------- Sticky filter + tab controls ---------- */
+.sticky-controls{
+  position:sticky; top:0; z-index:40;
+  background:var(--paper);
+  padding-top:20px; margin-top:-20px;
+  box-shadow:0 6px 12px -6px rgba(20,33,61,0.18);
+}
+
+/* ---------- Upload / drag-and-drop ---------- */
+.loadbar{ align-items:stretch; }
+.drop{
+  display:flex; align-items:center; gap:10px;
+  min-width:320px;
+}
+.drop .drop-icon{ font-size:17px; line-height:1; }
+.drop .drop-text{ display:flex; flex-direction:column; gap:1px; }
+.drop .drop-text .main-line{ font-size:12.5px; }
+.drop .drop-text .sub-line{ font-size:10.5px; opacity:0.6; }
+.drop.dragover{
+  background:rgba(169,129,47,0.22); border-color:var(--brass);
+  box-shadow:0 0 0 3px rgba(169,129,47,0.18);
+}
+.upload-progress-wrap{
+  flex:1; min-width:160px; max-width:260px;
+  display:flex; flex-direction:column; gap:4px; justify-content:center;
+}
+.upload-progress-track{
+  height:6px; border-radius:4px; background:rgba(255,255,255,0.15); overflow:hidden;
+}
+.upload-progress-bar{
+  height:100%; width:0%; background:var(--brass); border-radius:4px;
+  transition:width .15s ease-out;
+}
+.status.ok::before{ content:'✓ '; }
+.status.err::before{ content:'✗ '; }
+
+/* ---------- Card lift (subtle depth) ---------- */
+.kpi-card, .chart-card, .report-card{ box-shadow:0 1px 3px rgba(20,33,61,0.05); }
+.kpi-card{ transition:box-shadow .12s; }
+.kpi-card:hover{ box-shadow:0 3px 10px rgba(20,33,61,0.10); }
+
+/* ---------- Executive / Operations dashboards ---------- */
+.section-title{
+  font-family:var(--serif); font-size:14px; font-weight:700; color:var(--ink);
+  margin:26px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--line);
+  display:flex; align-items:baseline; gap:8px;
+}
+.section-title .section-note{ font-family:var(--sans); font-weight:400; font-size:11px; color:var(--text-dim); }
+.section-title:first-child{ margin-top:0; }
+
+.hero-kpi-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:6px; }
+@media(max-width:1000px){ .hero-kpi-grid{ grid-template-columns:repeat(2,1fr); } }
+.hero-kpi-card{
+  background:var(--ink); color:#fff; padding:16px 18px; border-radius:2px;
+  box-shadow:0 2px 8px rgba(20,33,61,0.18);
+}
+.hero-kpi-card .kpi-label{ color:rgba(255,255,255,0.65); }
+.hero-kpi-card .kpi-value{ color:#fff; font-size:24px; }
+.hero-kpi-card .kpi-delta{
+  font-family:var(--mono); font-size:11.5px; margin-top:6px; font-variant-numeric:tabular-nums;
+}
+.kpi-delta.up{ color:#8FD6B4; }
+.kpi-delta.down{ color:#F0A99C; }
+.kpi-delta.flat{ color:rgba(255,255,255,0.55); }
+
+.rank-list{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:0; }
+.rank-list li{
+  display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--line);
+  font-size:12.5px;
+}
+.rank-list li:last-child{ border-bottom:none; }
+.rank-list .rank-name{ flex:1; min-width:0; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.rank-list .rank-bar-track{ width:90px; height:6px; background:var(--paper-2); border-radius:4px; overflow:hidden; flex:0 0 auto; }
+.rank-list .rank-bar-fill{ height:100%; border-radius:4px; }
+.rank-list .rank-value{ font-family:var(--mono); font-variant-numeric:tabular-nums; width:92px; text-align:right; color:var(--ink); font-weight:600; flex:0 0 auto; }
+
+/* ---------- Mobile ---------- */
+@media(max-width:600px){
+  .app-header{ padding:16px 16px 14px; }
+  .app-title{ font-size:21px; }
+  .header-meta{ text-align:left; font-size:10.5px; margin-top:2px; }
+  .main{ padding:14px 14px 40px; }
+  .loadbar{ padding:10px 14px; }
+  .loadbar .drop{ min-width:0; flex:1 1 100%; }
+  .upload-progress-wrap{ flex:1 1 100%; max-width:none; }
+  .filterbar{ padding:12px; gap:10px; }
+  .filter-group{ flex:1 1 calc(50% - 5px); }
+  .filter-group select, .filter-group input[type=date]{ min-width:0; width:100%; }
+  .reset-btn{ flex:1 1 100%; }
+  .kpi-grid, .hero-kpi-grid{ grid-template-columns:1fr; }
+  .rank-list .rank-bar-track{ width:56px; }
+  .rank-list .rank-value{ width:76px; font-size:11.5px; }
+  .modal-box{ width:min(380px, 92vw); }
+}
+
+/* ---------- Print ---------- */
+/* Activated via printSection() adding body.printing(-page-X) right before
+   window.print() (and removing it after) rather than a bare @media print,
+   so we can choose exactly which page's table gets the full page instead of
+   printing whatever tab happened to be showing plus all the chrome. */
+@media print{
+  body.printing .app-header,
+  body.printing .loadbar,
+  body.printing .sticky-controls,
+  body.printing .empty-state,
+  body.printing .footer-note{ display:none !important; }
+
+  body.printing .main{ padding:0; max-width:none; }
+  body.printing .page{ display:none !important; }
+  body.printing.printing-page-pivot #page-pivot,
+  body.printing.printing-page-reports #page-reports{ display:block !important; }
+
+  /* Pivot Builder: only the table itself, full page width */
+  body.printing .pivot-header .hint,
+  body.printing .presets,
+  body.printing .pivot-sidebar,
+  body.printing .pivot-main-toolbar,
+  body.printing .layout-bar{ display:none !important; }
+  body.printing .pivot-workspace{ display:block; }
+  body.printing .pivot-main{ padding:0; width:100%; }
+
+  /* Reports: hide the menu grid / back button / filter controls, keep the
+     rendered report table */
+  body.printing #reportsMenu,
+  body.printing .report-detail-bar,
+  body.printing .pivot-controls{ display:none !important; }
+
+  table.pivot, table.pivot *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  table.pivot{ width:100% !important; font-size:10px; }
+  table.pivot th{ position:static; } /* sticky headers are meaningless on paper */
+  .pivot-table-wrap, #reportOutput{ overflow:visible !important; padding:0; margin:0; width:auto !important; }
+
+  @page{ size:landscape; margin:12mm; }
+}
 
 </style>
 </head>
@@ -434,8 +635,17 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
 </header>
 
 <div class="loadbar">
-  <div class="drop" id="dropZone">⇪ Upload today's export (.csv preferred, .xlsx also works) — click or drag file here</div>
+  <div class="drop" id="dropZone">
+    <span class="drop-icon">⇪</span>
+    <span class="drop-text">
+      <span class="main-line">Drop today's export here, or click to browse</span>
+      <span class="sub-line">.csv preferred (fastest) — .xlsx / .xls also work</span>
+    </span>
+  </div>
   <input type="file" id="fileInput" accept=".csv,.xlsx,.xls">
+  <div class="upload-progress-wrap hidden" id="uploadProgressWrap">
+    <div class="upload-progress-track"><div class="upload-progress-bar" id="uploadProgressBar"></div></div>
+  </div>
   <button class="reset-btn" id="refreshFromServerBtn" style="color:#fff;border-color:rgba(255,255,255,0.35)">⟳ Refresh from server</button>
   <span class="status" id="loadStatus">Checking server…</span>
 </div>
@@ -448,20 +658,24 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
 
   <div id="mainContent" class="hidden">
 
-    <div class="filterbar">
-      <div class="filter-group"><label>Outlet</label><select id="f_outlet"></select></div>
-      <div class="filter-group"><label>Category</label><select id="f_category"></select></div>
-      <div class="filter-group"><label>Class</label><select id="f_class"></select></div>
-      <div class="filter-group"><label>Supplier</label><select id="f_supplier"></select></div>
-      <div class="filter-group"><label>Date From</label><input type="date" id="dateFrom"></div>
-      <div class="filter-group"><label>Date To</label><input type="date" id="dateTo"></div>
-      <button class="reset-btn" id="resetFiltersBtn">Reset filters</button>
-    </div>
+    <div class="sticky-controls">
+      <div class="filterbar">
+        <div class="filter-group"><label>Outlet</label><select id="f_outlet"></select></div>
+        <div class="filter-group"><label>Category</label><select id="f_category"></select></div>
+        <div class="filter-group"><label>Class</label><select id="f_class"></select></div>
+        <div class="filter-group"><label>Supplier</label><select id="f_supplier"></select></div>
+        <div class="filter-group"><label>Date From</label><input type="date" id="dateFrom"></div>
+        <div class="filter-group"><label>Date To</label><input type="date" id="dateTo"></div>
+        <button class="reset-btn" id="resetFiltersBtn">Reset filters</button>
+      </div>
 
-    <div class="tab-bar">
-      <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-      <button class="tab-btn" data-tab="pivot">Pivot Builder</button>
-      <button class="tab-btn" data-tab="reports">Reports</button>
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+        <button class="tab-btn" data-tab="executive">Executive</button>
+        <button class="tab-btn" data-tab="operations">Operations</button>
+        <button class="tab-btn" data-tab="pivot">Pivot Builder</button>
+        <button class="tab-btn" data-tab="reports">Reports</button>
+      </div>
     </div>
 
     <!-- ===================== DASHBOARD PAGE ===================== -->
@@ -477,6 +691,58 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
       </div>
     </div>
 
+    <!-- ===================== EXECUTIVE (CFO) PAGE ===================== -->
+    <div class="page hidden" id="page-executive">
+      <div class="section-title">Headline Performance <span class="section-note">vs. the same-length period immediately before it</span></div>
+      <div class="hero-kpi-grid" id="execHeroGrid"></div>
+
+      <div class="section-title">Trend</div>
+      <div class="chart-row full">
+        <div class="chart-card"><h3>Monthly Sales &amp; Gross Profit</h3><canvas id="chartExecMonthly"></canvas></div>
+      </div>
+
+      <div class="section-title">Where Margin Is Won and Lost <span class="section-note">GP % by category — green is profitable, red is a loss</span></div>
+      <div class="chart-row full">
+        <div class="chart-card"><h3>GP % by Category</h3><canvas id="chartExecMarginByCat" style="max-height:320px"></canvas></div>
+      </div>
+
+      <div class="section-title">Outlet Performance</div>
+      <div class="chart-row">
+        <div class="chart-card"><h3>Sales by Outlet</h3><canvas id="chartExecOutletSales"></canvas></div>
+        <div class="chart-card">
+          <h3>Gross Profit Contribution by Outlet</h3>
+          <ul class="rank-list" id="execOutletGPList"></ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== OPERATIONS PAGE ===================== -->
+    <div class="page hidden" id="page-operations">
+      <div class="section-title">Operating Volume</div>
+      <div class="kpi-grid" id="opsKpiGrid"></div>
+
+      <div class="section-title">Sales Pace <span class="section-note">for staffing &amp; scheduling</span></div>
+      <div class="chart-row">
+        <div class="chart-card"><h3>Sales by Weekday</h3><canvas id="chartOpsWeekday"></canvas></div>
+        <div class="chart-card"><h3>Transactions by Weekday</h3><canvas id="chartOpsWeekdayTxns"></canvas></div>
+      </div>
+
+      <div class="section-title">Movement <span class="section-note">what's actually moving through the tills</span></div>
+      <div class="chart-row">
+        <div class="chart-card">
+          <h3>Top 15 Items by Qty Sold</h3>
+          <ul class="rank-list" id="opsTopItemsList"></ul>
+        </div>
+        <div class="chart-card"><h3>Qty Sold by Category</h3><canvas id="chartOpsQtyByCat"></canvas></div>
+      </div>
+
+      <div class="section-title">Outlet Operating Metrics</div>
+      <div class="chart-row">
+        <div class="chart-card"><h3>Transactions by Outlet</h3><canvas id="chartOpsOutletTxns"></canvas></div>
+        <div class="chart-card"><h3>Avg Basket Value by Outlet</h3><canvas id="chartOpsOutletBasket"></canvas></div>
+      </div>
+    </div>
+
     <!-- ===================== PIVOT BUILDER PAGE ===================== -->
     <div class="page hidden" id="page-pivot">
       <div class="pivot-section">
@@ -487,71 +753,85 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
 
         <div class="presets" id="presetBar"></div>
 
-        <div class="layout-bar">
-          <button class="layout-btn" id="saveLayoutBtn">💾 Save Layout As…</button>
-          <select id="layoutSelect"><option value="">— Load saved layout —</option></select>
-          <button class="layout-btn danger" id="deleteLayoutBtn">Delete Selected</button>
-          <span class="pivot-message hidden" id="pivotMessage"></span>
-        </div>
-
-        <div class="builder-grid">
-          <div class="field-panel">
-            <div class="field-panel-col">
-              <h4>Dimensions <span class="hint-inline">→ Rows / Columns</span></h4>
-              <div class="field-chip-list" id="dimFieldList"></div>
+        <div class="pivot-workspace">
+          <div class="pivot-sidebar">
+            <div class="layout-bar">
+              <button class="layout-btn" id="saveLayoutBtn">💾 Save Layout As…</button>
+              <select id="layoutSelect"><option value="">— Load saved layout —</option></select>
+              <button class="layout-btn danger" id="deleteLayoutBtn">Delete Selected</button>
+              <span class="pivot-message hidden" id="pivotMessage"></span>
             </div>
-            <div class="field-panel-col">
-              <h4>Values <span class="hint-inline">→ Values</span></h4>
-              <div class="field-chip-list" id="valueFieldList"></div>
-              <button class="add-calc-btn" id="showCalcFormBtn">+ Add Calculated Field</button>
-              <div class="calc-form hidden" id="calcFieldForm">
-                <input type="text" id="calcName" placeholder="Field name, e.g. Margin per Unit">
-                <input type="text" id="calcFormula" placeholder="Formula, e.g. GP / Qty">
-                <div class="calc-form-row">
-                  <select id="calcFmt">
-                    <option value="money">Currency (AED)</option>
-                    <option value="number">Number</option>
-                    <option value="percent">Percent</option>
-                  </select>
-                  <button class="add-calc-btn" id="calcAddBtn">Add Field</button>
+
+            <div class="field-panel">
+              <div class="field-panel-col">
+                <h4>Dimensions <span class="hint-inline">→ Rows / Columns</span></h4>
+                <div class="field-chip-list" id="dimFieldList"></div>
+              </div>
+              <div class="field-panel-col">
+                <h4>Values <span class="hint-inline">→ Values</span></h4>
+                <div class="field-chip-list" id="valueFieldList"></div>
+                <button class="add-calc-btn" id="showCalcFormBtn">+ Add Calculated Field</button>
+                <div class="calc-form hidden" id="calcFieldForm">
+                  <input type="text" id="calcName" placeholder="Field name, e.g. Margin per Unit">
+                  <input type="text" id="calcFormula" placeholder="Formula, e.g. GP / Qty">
+                  <div class="calc-form-row">
+                    <select id="calcFmt">
+                      <option value="money">Currency (AED)</option>
+                      <option value="number">Number</option>
+                      <option value="percent">Percent</option>
+                    </select>
+                    <button class="add-calc-btn" id="calcAddBtn">Add Field</button>
+                  </div>
+                  <div class="calc-tokens">Available: Sales, Cost, GP, GPPercent, Qty, LineItems, DaysSold — with + − * / ( )</div>
+                  <div class="calc-error hidden" id="calcError"></div>
                 </div>
-                <div class="calc-tokens">Available: Sales, Cost, GP, GPPercent, Qty, LineItems — with + − * / ( )</div>
-                <div class="calc-error hidden" id="calcError"></div>
               </div>
             </div>
+
+            <div class="pivot-zones">
+              <div class="pivot-zone" id="zone-rows" data-zone="rows">
+                <h5>ROWS <span class="zone-note">up to 5, order matters</span></h5>
+                <div class="zone-chips" id="zoneChips-rows"></div>
+              </div>
+              <div class="pivot-zone" id="zone-columns" data-zone="columns">
+                <h5>COLUMNS <span class="zone-note">optional, up to 1</span></h5>
+                <div class="zone-chips" id="zoneChips-columns"></div>
+              </div>
+              <div class="pivot-zone" id="zone-values" data-zone="values">
+                <h5>VALUES</h5>
+                <div class="zone-chips" id="zoneChips-values"></div>
+              </div>
+            </div>
+
+            <div class="pivot-controls">
+              <div class="filter-group"><label>Sort</label>
+                <select id="p_sortdir">
+                  <option value="desc">Highest first</option>
+                  <option value="asc">Lowest first</option>
+                </select></div>
+              <div class="filter-group"><label>Sort by</label>
+                <select id="p_sortmetric"></select></div>
+              <div class="filter-group"><label>Top N per level</label>
+                <input type="number" id="p_topn" value="15" min="1" max="500"></div>
+              <button class="csv-btn" id="csvExportBtn">Export view as CSV</button>
+              <button class="xlsx-btn" id="xlsxExportBtn">Export view as Excel</button>
+              <button class="print-btn" id="pivotPrintBtn">🖨 Print</button>
+            </div>
           </div>
 
-          <div class="pivot-zones">
-            <div class="pivot-zone" id="zone-rows" data-zone="rows">
-              <h5>ROWS <span class="zone-note">up to 5, order matters</span></h5>
-              <div class="zone-chips" id="zoneChips-rows"></div>
+          <div class="pivot-main">
+            <div class="pivot-main-toolbar">
+              <button class="toolbar-btn" id="fullWidthToggleBtn" title="Hide the sidebar so the table uses the full screen width">⛶ Full Width</button>
+              <div class="density-control" title="Table row size">
+                <span class="density-label">Size</span>
+                <button class="density-btn" data-density="compact">S</button>
+                <button class="density-btn active" data-density="normal">M</button>
+                <button class="density-btn" data-density="large">L</button>
+              </div>
             </div>
-            <div class="pivot-zone" id="zone-columns" data-zone="columns">
-              <h5>COLUMNS <span class="zone-note">optional, up to 1</span></h5>
-              <div class="zone-chips" id="zoneChips-columns"></div>
-            </div>
-            <div class="pivot-zone" id="zone-values" data-zone="values">
-              <h5>VALUES</h5>
-              <div class="zone-chips" id="zoneChips-values"></div>
-            </div>
+            <div class="pivot-table-wrap" id="pivotTableWrap"></div>
           </div>
         </div>
-
-        <div class="pivot-controls">
-          <div class="filter-group"><label>Sort</label>
-            <select id="p_sortdir">
-              <option value="desc">Highest first</option>
-              <option value="asc">Lowest first</option>
-            </select></div>
-          <div class="filter-group"><label>Sort by</label>
-            <select id="p_sortmetric"></select></div>
-          <div class="filter-group"><label>Top N per level</label>
-            <input type="number" id="p_topn" value="15" min="1" max="500"></div>
-          <button class="csv-btn" id="csvExportBtn">Export view as CSV</button>
-          <button class="xlsx-btn" id="xlsxExportBtn">Export view as Excel</button>
-        </div>
-
-        <div class="pivot-table-wrap" id="pivotTableWrap"></div>
       </div>
     </div>
 
@@ -582,6 +862,7 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
               <input type="number" id="report_topn" value="15" min="1" max="500"></div>
             <button class="csv-btn" id="reportCsvBtn">Export report as CSV</button>
             <button class="xlsx-btn" id="reportXlsxBtn">Export report as Excel</button>
+            <button class="print-btn" id="reportPrintBtn">🖨 Print</button>
           </div>
           <div class="pivot-controls" id="reportCustomDateRow">
             <div class="filter-group"><label>Period A — Start</label><input type="date" id="cdv_a_start"></div>
@@ -686,9 +967,10 @@ const METRICS = {
   gp:    { label:'Gross Profit', short:'Gross Profit (AED)', agg:'sum', field:'gp', fmt:fmtMoney, type:'money' },
   gppct: { label:'GP %',    short:'GP %',          agg:'gppct', field:null,    fmt:fmtPct, type:'percent' },
   qty:   { label:'Qty',     short:'Qty',           agg:'sum',   field:'qty',  fmt:fmtNum, type:'number' },
-  count: { label:'Line Items', short:'Line Items', agg:'count', field:null,    fmt:fmtNum, type:'number' }
+  count: { label:'Line Items', short:'Line Items', agg:'count', field:null,    fmt:fmtNum, type:'number' },
+  daysSold: { label:'Days Sold', short:'Days Sold', agg:'count', field:null,  fmt:fmtNum, type:'number' }
 };
-const METRIC_ORDER = ['sales','cost','gp','gppct','qty','count'];
+const METRIC_ORDER = ['sales','cost','gp','gppct','qty','count','daysSold'];
 const FORMATTERS = { money:fmtMoney, number:fmtNum, percent:fmtPct };
 
 const WEEKDAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -714,7 +996,7 @@ let lastPivotExport = null; // {headers, rows, grandRow} - raw numbers, for CSV/
    The browser never holds the raw sales rows; the server (DuckDB) does the
    filtering/grouping and returns only the small aggregated result.
    ============================================================ */
-const ZERO_SUMS = { sales:0, cost:0, gp:0, gppct:0, qty:0, count:0 };
+const ZERO_SUMS = { sales:0, cost:0, gp:0, gppct:0, qty:0, count:0, daysSold:0 };
 const API = {
   async _post(url, body){
     const res = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
@@ -795,6 +1077,7 @@ const PRESET_GROUPS = [
     { name:'Top 25 Items by Sales', rows:['item'], columns:[], values:['sales','qty'], topN:25 },
     { name:'Top 25 Items by Qty', rows:['item'], columns:[], values:['qty','sales'], topN:25, sortMetric:'qty' },
     { name:'Class → Item (Top sellers)', rows:['class_','item'], columns:[], values:['sales'], topN:10 },
+    { name:'Days Sold per Item (Top 25 by Sales)', rows:['item'], columns:[], values:['sales','qty','daysSold'], topN:25 },
   ]},
   { group:'Time', presets:[
     { name:'Month Breakdown', rows:['month'], columns:[] },
@@ -859,6 +1142,14 @@ function setStatus(msg, cls){
   el.className = 'status' + (cls ? ' '+cls : '');
 }
 
+function setUploadProgress(frac){
+  const wrap = document.getElementById('uploadProgressWrap');
+  const bar = document.getElementById('uploadProgressBar');
+  if(frac===null){ wrap.classList.add('hidden'); bar.style.width='0%'; return; }
+  wrap.classList.remove('hidden');
+  bar.style.width = Math.round(frac*100)+'%';
+}
+
 async function handleFile(file){
   if(!file) return;
   const name = file.name.toLowerCase();
@@ -866,18 +1157,23 @@ async function handleFile(file){
     setStatus('Please choose a .csv or .xlsx file.', 'err'); return;
   }
   setStatus('Uploading ' + file.name + ' …', '');
+  setUploadProgress(0);
   try{
     const result = await API.upload(file, (frac)=>{
+      setUploadProgress(frac);
       setStatus('Uploading ' + file.name + ' — ' + Math.round(frac*100) + '%', '');
     });
+    setUploadProgress(1);
     setStatus('Ingesting on server …', '');
     const skipNote = result.skipped ? '  ('+result.skipped.toLocaleString()+' row(s) skipped — no readable date)' : '';
     await afterDataLoaded();
+    setUploadProgress(null);
     setStatus(result.rows.toLocaleString()+' rows loaded from '+file.name+skipNote+
       '  |  '+fmtDate(new Date(serverStatus.dateMin+'T00:00:00'))+' to '+fmtDate(new Date(serverStatus.dateMax+'T00:00:00'))+
       '  |  ingested in '+(result.ingestMs/1000).toFixed(1)+'s', 'ok');
   }catch(err){
     console.error(err);
+    setUploadProgress(null);
     setStatus('Upload failed: ' + err.message, 'err');
   }
 }
@@ -992,7 +1288,7 @@ function allValueFieldKeys(){ return [...METRIC_ORDER, ...calculatedFields.map(c
    CALCULATED FIELDS
    ============================================================ */
 const CALC_TOKENS = [
-  ['GPPercent','gppct'], ['LineItems','count'], ['Sales','sales'],
+  ['GPPercent','gppct'], ['LineItems','count'], ['DaysSold','daysSold'], ['Sales','sales'],
   ['Cost','cost'], ['GP','gp'], ['Qty','qty']
 ].sort((a,b)=>b[0].length-a[0].length);
 
@@ -1015,7 +1311,7 @@ function compileFormula(formula){
   }catch(e){
     throw new Error('Could not parse formula.');
   }
-  const dummy = {sales:100,cost:60,gp:40,gppct:0.4,qty:10,count:5};
+  const dummy = {sales:100,cost:60,gp:40,gppct:0.4,qty:10,count:5,daysSold:3};
   try{ fn(dummy); }catch(e){ throw new Error('Formula error: '+e.message); }
   return fn;
 }
@@ -1070,9 +1366,31 @@ async function renderKPIs(){
 
 /* ============================================================
    CHARTS
+   A single canvasId-keyed registry backs every chart on every tab — this
+   replaces one-variable-per-chart so the Executive/Operations dashboards
+   can add chart instances without hand-wiring a new module-level variable
+   for each one.
    ============================================================ */
-let chartCat=null, chartClass=null, chartTrend=null;
+let chartInstances = {};
 const CHART_COLORS = ['#A9812F','#14213D','#1F5C4D','#8F332B','#6B6A63','#5B7FA6','#B08D3E','#3E6E63'];
+// Single-hue sequential ramps (light->dark) for magnitude-ranked bars, per
+// the "sequential is the safe default for magnitude" rule — used instead of
+// cycling the categorical palette when the bars are a ranked sequence rather
+// than a set of independently-identified series.
+const SEQ_BRASS = ['#F1E4C6','#E4CE9C','#D3B36B','#C29B41','#A9812F','#8A6A23'];
+const SEQ_GREEN = ['#CFE6DC','#A9D2C0','#7EBBA3','#549E86','#2F7F68','#1F5C4D'];
+function seqShades(n, ramp){
+  if(n<=1) return [ramp[ramp.length-1]];
+  return Array.from({length:n}, (_,i)=> ramp[Math.round(i*(ramp.length-1)/(n-1))]);
+}
+
+function upsertChart(canvasId, config){
+  const el = document.getElementById(canvasId);
+  if(!el) return null;
+  if(chartInstances[canvasId]) chartInstances[canvasId].destroy();
+  chartInstances[canvasId] = new Chart(el, config);
+  return chartInstances[canvasId];
+}
 
 async function renderCharts(){
   const bf = baseFilters();
@@ -1081,16 +1399,15 @@ async function renderCharts(){
     API.aggregate({ filters:bf, groupBy:'class_', sortMetric:'sales', sortDir:'desc' }),
     API.aggregate({ filters:bf, groupBy:'day', sortMetric:'sales', sortDir:'desc' }),
   ]);
-  upsertBarChart('chartCategory', catRes.rows.map(r=>r.key), catRes.rows.map(r=>r.sales), 'chartCat_ref');
-  upsertBarChart('chartClass', classRes.rows.map(r=>r.key), classRes.rows.map(r=>r.sales), 'chartClass_ref', true);
+  upsertBarChart('chartCategory', catRes.rows.map(r=>r.key), catRes.rows.map(r=>r.sales));
+  upsertBarChart('chartClass', classRes.rows.map(r=>r.key), classRes.rows.map(r=>r.sales), true);
 
   const dayRows = [...dayRes.rows].sort((a,b)=>a.key<b.key?-1:1);
   upsertLineChart('chartTrend', dayRows.map(r=>r.key), dayRows.map(r=>r.sales));
 }
 
-function upsertBarChart(canvasId, labels, values, refName, horizontal){
-  const ctx = document.getElementById(canvasId);
-  const cfg = {
+function upsertBarChart(canvasId, labels, values, horizontal){
+  upsertChart(canvasId, {
     type:'bar',
     data:{ labels, datasets:[{ label:'Sales (AED)', data:values, backgroundColor: labels.map((_,i)=>CHART_COLORS[i%CHART_COLORS.length]) }]},
     options:{
@@ -1099,15 +1416,11 @@ function upsertBarChart(canvasId, labels, values, refName, horizontal){
       plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(c)=>fmtMoney(c.parsed[horizontal?'x':'y'])+' AED'}} },
       scales:{ x:{ticks:{font:{size:10}}}, y:{ticks:{font:{size:10}}} }
     }
-  };
-  if(refName==='chartCat_ref'){ if(chartCat) chartCat.destroy(); chartCat = new Chart(ctx, cfg); }
-  else { if(chartClass) chartClass.destroy(); chartClass = new Chart(ctx, cfg); }
+  });
 }
 
 function upsertLineChart(canvasId, labels, values){
-  const ctx = document.getElementById(canvasId);
-  if(chartTrend) chartTrend.destroy();
-  chartTrend = new Chart(ctx, {
+  upsertChart(canvasId, {
     type:'line',
     data:{ labels, datasets:[{ label:'Daily Sales', data:values, borderColor:'#A9812F', backgroundColor:'rgba(169,129,47,0.12)', fill:true, tension:0.15, pointRadius:0, borderWidth:2 }]},
     options:{
@@ -1118,29 +1431,237 @@ function upsertLineChart(canvasId, labels, values){
   });
 }
 
+// A ranked single-magnitude bar chart, one sequential hue, sorted order
+// preserved as given (caller sorts). Used for magnitude comparisons across
+// a ranked set of named entities (outlets, categories) rather than a fixed
+// small set of identity-carrying series.
+function upsertRankedBarChart(canvasId, labels, values, ramp, opts){
+  opts = opts || {};
+  upsertChart(canvasId, {
+    type:'bar',
+    data:{ labels, datasets:[{ label:opts.label||'Value', data:values, backgroundColor: seqShades(values.length, ramp) }]},
+    options:{
+      indexAxis: opts.horizontal?'y':'x',
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(c)=>(opts.fmt||fmtMoney)(c.parsed[opts.horizontal?'x':'y'])} } },
+      scales:{ x:{ticks:{font:{size:10}}}, y:{ticks:{font:{size:10}}} }
+    }
+  });
+}
+
+// Diverging bar (green=positive, brick=negative) for a polarity metric like
+// GP% around a zero baseline, rather than a sequential/categorical ramp.
+function upsertDivergingBarChart(canvasId, labels, values, opts){
+  opts = opts || {};
+  upsertChart(canvasId, {
+    type:'bar',
+    data:{ labels, datasets:[{ label:opts.label||'Value', data:values,
+      backgroundColor: values.map(v=> v>=0 ? '#1F5C4D' : '#8F332B') }]},
+    options:{
+      indexAxis:'y',
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(c)=>(opts.fmt||fmtPct)(c.parsed.x)} } },
+      scales:{ x:{ticks:{font:{size:10}, callback:(v)=>(opts.fmt||fmtPct)(v)}}, y:{ticks:{font:{size:10.5}}} }
+    }
+  });
+}
+
+// Two-series combo (bar + line) sharing ONE y-axis — legitimate only because
+// both series (Sales, Gross Profit) are the same unit (AED); never do this
+// across two different units, which is what a second axis would paper over.
+function upsertComboBarLine(canvasId, labels, barValues, lineValues, barLabel, lineLabel){
+  upsertChart(canvasId, {
+    type:'bar',
+    data:{ labels, datasets:[
+      { type:'bar', label:barLabel, data:barValues, backgroundColor:'#DCC98A', order:2 },
+      { type:'line', label:lineLabel, data:lineValues, borderColor:'#1F5C4D', backgroundColor:'#1F5C4D', pointRadius:3, borderWidth:2, tension:0.15, order:1 },
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:true, position:'top', labels:{boxWidth:12, font:{size:11}}},
+        tooltip:{callbacks:{label:(c)=>c.dataset.label+': '+fmtMoney(c.parsed.y)+' AED'}} },
+      scales:{ x:{ticks:{font:{size:10}}}, y:{ticks:{font:{size:10}, callback:(v)=>fmtMoney(v)}} }
+    }
+  });
+}
+
+// Renders a compact ranked list (name + proportional bar + value) — used
+// where a full chart would be overkill (e.g. top-N items) or where a bar
+// chart's axis labels would be too long/numerous to read cleanly.
+function renderRankList(containerId, rows, opts){
+  opts = opts || {};
+  const wrap = document.getElementById(containerId);
+  if(!wrap) return;
+  const max = Math.max(1, ...rows.map(r=>Math.abs(opts.getValue(r))));
+  wrap.innerHTML = rows.map(r=>{
+    const v = opts.getValue(r);
+    const pct = Math.max(2, Math.round(100*Math.abs(v)/max));
+    const color = opts.colorFor ? opts.colorFor(v) : 'var(--brass)';
+    return `<li>
+      <span class="rank-name" title="${escapeHtml(opts.getName(r))}">${escapeHtml(opts.getName(r))}</span>
+      <span class="rank-bar-track"><span class="rank-bar-fill" style="width:${pct}%;background:${color}"></span></span>
+      <span class="rank-value">${(opts.fmt||fmtMoney)(v)}</span>
+    </li>`;
+  }).join('') || '<li class="zone-empty">No data for the current filters.</li>';
+}
+
+/* ============================================================
+   EXECUTIVE (CFO) DASHBOARD
+   A curated top-level view: headline KPIs with a vs-prior-period delta,
+   the monthly trend, where margin is actually won/lost, and outlet
+   performance — distinct from the drill-down Pivot Builder/Reports tabs.
+   ============================================================ */
+function deltaBadge(curr, prev){
+  if(!prev && prev!==0) return null;
+  if(prev===0) return { cls:'flat', text:'— vs prior period (was zero)' };
+  const pct = (curr-prev)/Math.abs(prev)*100;
+  const cls = pct>0.5 ? 'up' : (pct<-0.5 ? 'down' : 'flat');
+  const arrow = cls==='up' ? '▲' : (cls==='down' ? '▼' : '—');
+  return { cls, text: arrow+' '+(pct>=0?'+':'')+pct.toFixed(1)+'% vs prior period' };
+}
+
+async function renderExecutiveTab(){
+  const bf = baseFilters();
+
+  // Previous period of equal length, immediately preceding the current
+  // filtered range — this is what powers every hero KPI's delta badge.
+  let prevFilters = null;
+  if(filters.dateFrom && filters.dateTo){
+    const lengthDays = Math.round((filters.dateTo-filters.dateFrom)/86400000)+1;
+    const prevTo = new Date(filters.dateFrom.getTime() - 86400000);
+    const prevFrom = new Date(prevTo.getTime() - (lengthDays-1)*86400000);
+    prevFilters = { ...bf, dateFrom: fmtDate(prevFrom), dateTo: fmtDate(prevTo) };
+  }
+
+  const [curr, prev, monthRes, catMarginRes, outletRes] = await Promise.all([
+    API.aggregate({ filters: bf }),
+    prevFilters ? API.aggregate({ filters: prevFilters }) : Promise.resolve(null),
+    API.aggregate({ filters: bf, groupBy:'month', sortMetric:'sales', sortDir:'desc' }),
+    API.aggregate({ filters: bf, groupBy:'category', sortMetric:'sales', sortDir:'desc' }),
+    API.aggregate({ filters: bf, groupBy:'outlet', sortMetric:'sales', sortDir:'desc' }),
+  ]);
+  const s = curr.grand, p = prev ? prev.grand : null;
+
+  const heroCards = [
+    ['TOTAL SALES', fmtMoney(s.sales)+' AED', p && deltaBadge(s.sales, p.sales)],
+    ['GROSS PROFIT', fmtMoney(s.gp)+' AED', p && deltaBadge(s.gp, p.gp)],
+    ['GROSS MARGIN %', fmtPct(s.gppct), p && deltaBadge(s.gppct, p.gppct)],
+    ['LINE ITEMS SOLD', fmtNum(s.count), p && deltaBadge(s.count, p.count)],
+  ];
+  document.getElementById('execHeroGrid').innerHTML = heroCards.map(([label,val,delta])=>
+    `<div class="hero-kpi-card">
+      <div class="kpi-label">${label}</div>
+      <div class="kpi-value">${val}</div>
+      ${delta ? `<div class="kpi-delta ${delta.cls}">${delta.text}</div>` : '<div class="kpi-delta flat">no prior period to compare</div>'}
+    </div>`
+  ).join('');
+
+  const monthRows = [...monthRes.rows].sort((a,b)=>a.key<b.key?-1:1);
+  upsertComboBarLine('chartExecMonthly', monthRows.map(r=>r.key), monthRows.map(r=>r.sales), monthRows.map(r=>r.gp), 'Sales', 'Gross Profit');
+
+  // A handful of near-zero-volume/mis-tagged categories (a stray row or two,
+  // e.g. a supplier name that ended up in the category field) can carry a
+  // wild GP% that would blow out the whole chart's scale and squash every
+  // real category flat — excluded here by requiring at least 1% of total
+  // transaction volume, rather than a fixed top-N (which does nothing once
+  // the real category count is already under N).
+  const catMinCount = Math.max(1, s.count * 0.01);
+  const catMarginSorted = catMarginRes.rows
+    .filter(r=>r.count>=catMinCount)
+    .sort((a,b)=>b.gppct-a.gppct);
+  upsertDivergingBarChart('chartExecMarginByCat', catMarginSorted.map(r=>r.key), catMarginSorted.map(r=>r.gppct));
+
+  upsertRankedBarChart('chartExecOutletSales', outletRes.rows.map(r=>r.key), outletRes.rows.map(r=>r.sales), SEQ_BRASS, {horizontal:true});
+
+  const outletByGP = [...outletRes.rows].sort((a,b)=>b.gp-a.gp);
+  renderRankList('execOutletGPList', outletByGP, {
+    getName:r=>r.key, getValue:r=>r.gp, fmt:v=>fmtMoney(v)+' AED',
+    colorFor:v=> v>=0 ? 'var(--green)' : 'var(--brick)'
+  });
+}
+
+/* ============================================================
+   OPERATIONS DASHBOARD
+   Day-to-day operating view: volume/transactions rather than margin, sales
+   pace by weekday for staffing, and what's actually moving through tills.
+   ============================================================ */
+async function renderOperationsTab(){
+  const bf = baseFilters();
+  const days = (filters.dateFrom && filters.dateTo) ? Math.max(1, Math.round((filters.dateTo-filters.dateFrom)/86400000)+1) : 1;
+
+  const [curr, weekdayRes, itemRes, catQtyRes, outletRes] = await Promise.all([
+    API.aggregate({ filters: bf }),
+    API.aggregate({ filters: bf, groupBy:'weekday' }),
+    API.aggregate({ filters: bf, groupBy:'item', sortMetric:'qty', sortDir:'desc', limit:15 }),
+    API.aggregate({ filters: bf, groupBy:'category', sortMetric:'qty', sortDir:'desc' }),
+    API.aggregate({ filters: bf, groupBy:'outlet', sortMetric:'count', sortDir:'desc' }),
+  ]);
+  const s = curr.grand;
+  const avgBasket = s.count!==0 ? s.sales/s.count : 0;
+  const avgDailyTxns = s.count/days;
+
+  const kpiCards = [
+    ['QTY SOLD', fmtNum(s.qty), ''],
+    ['TRANSACTIONS (LINE ITEMS)', fmtNum(s.count), ''],
+    ['AVG BASKET VALUE', fmtMoney(avgBasket)+' AED', 'green'],
+    ['AVG DAILY TRANSACTIONS', fmtNum(avgDailyTxns), 'ink'],
+  ];
+  document.getElementById('opsKpiGrid').innerHTML = kpiCards.map(([label,val,cls])=>
+    `<div class="kpi-card ${cls}"><div class="kpi-label">${label}</div><div class="kpi-value">${val}</div></div>`
+  ).join('');
+
+  const weekdayRows = [...weekdayRes.rows].sort((a,b)=>WEEKDAYS.indexOf(a.key)-WEEKDAYS.indexOf(b.key));
+  upsertRankedBarChart('chartOpsWeekday', weekdayRows.map(r=>r.key), weekdayRows.map(r=>r.sales), SEQ_GREEN, {fmt:fmtMoney});
+  upsertRankedBarChart('chartOpsWeekdayTxns', weekdayRows.map(r=>r.key), weekdayRows.map(r=>r.count), SEQ_GREEN, {fmt:fmtNum});
+
+  renderRankList('opsTopItemsList', itemRes.rows, {
+    getName:r=>r.key, getValue:r=>r.qty, fmt:fmtNum, colorFor:()=>'var(--green)'
+  });
+
+  upsertRankedBarChart('chartOpsQtyByCat', catQtyRes.rows.map(r=>r.key), catQtyRes.rows.map(r=>r.qty), SEQ_GREEN, {fmt:fmtNum});
+
+  upsertRankedBarChart('chartOpsOutletTxns', outletRes.rows.map(r=>r.key), outletRes.rows.map(r=>r.count), SEQ_GREEN, {horizontal:true, fmt:fmtNum});
+
+  const outletBasket = [...outletRes.rows]
+    .map(r=>({ key:r.key, basket: r.count!==0 ? r.sales/r.count : 0 }))
+    .sort((a,b)=>b.basket-a.basket);
+  upsertRankedBarChart('chartOpsOutletBasket', outletBasket.map(r=>r.key), outletBasket.map(r=>r.basket), SEQ_BRASS, {horizontal:true, fmt:v=>fmtMoney(v)+' AED'});
+}
+
 /* ============================================================
    FIELD LIST + DRAG & DROP (Pivot Builder)
    ============================================================ */
+// A chip already placed in a zone renders "in use" (faded, not re-draggable)
+// in its source list instead of looking identically available in both
+// places at once — dropping it again is already a harmless no-op (see the
+// early-return guards in addFieldToZone), this just makes that visible.
 function renderDimFieldList(){
   const wrap = document.getElementById('dimFieldList');
-  wrap.innerHTML = DIM_ORDER.map(k=>
-    `<div class="field-chip" draggable="true" data-key="${k}" data-source="dim">${DIM_FIELDS[k].label}</div>`
-  ).join('');
-  wrap.querySelectorAll('.field-chip').forEach(el=>{
+  const inUse = new Set([...pivotConfig.rows, ...pivotConfig.columns]);
+  wrap.innerHTML = DIM_ORDER.map(k=>{
+    const used = inUse.has(k);
+    return `<div class="field-chip${used?' in-use':''}" draggable="${!used}" data-key="${k}" data-source="dim" title="${used?'Already placed — remove it from Rows/Columns first to drag elsewhere':''}">${DIM_FIELDS[k].label}</div>`;
+  }).join('');
+  wrap.querySelectorAll('.field-chip:not(.in-use)').forEach(el=>{
     el.addEventListener('dragstart', onFieldDragStart);
   });
 }
 
 function renderValueFieldList(){
   const wrap = document.getElementById('valueFieldList');
-  const builtIn = METRIC_ORDER.map(k=>
-    `<div class="field-chip value-chip" draggable="true" data-key="${k}" data-source="value">${METRICS[k].label}</div>`).join('');
-  const calc = calculatedFields.map(c=>
-    `<div class="field-chip value-chip calc-chip" draggable="true" data-key="${c.id}" data-source="value">
+  const inUse = new Set(pivotConfig.values);
+  const builtIn = METRIC_ORDER.map(k=>{
+    const used = inUse.has(k);
+    return `<div class="field-chip value-chip${used?' in-use':''}" draggable="${!used}" data-key="${k}" data-source="value" title="${used?'Already placed — remove it from Values first to drag elsewhere':''}">${METRICS[k].label}</div>`;
+  }).join('');
+  const calc = calculatedFields.map(c=>{
+    const used = inUse.has(c.id);
+    return `<div class="field-chip value-chip calc-chip${used?' in-use':''}" draggable="${!used}" data-key="${c.id}" data-source="value" title="${used?'Already placed — remove it from Values first to drag elsewhere':''}">
        ${escapeHtml(c.name)} <span class="chip-del" data-calc-id="${c.id}" title="Delete this calculated field">×</span>
-     </div>`).join('');
+     </div>`;
+  }).join('');
   wrap.innerHTML = builtIn + calc;
-  wrap.querySelectorAll('.field-chip').forEach(el=>{
+  wrap.querySelectorAll('.field-chip:not(.in-use)').forEach(el=>{
     el.addEventListener('dragstart', onFieldDragStart);
   });
   wrap.querySelectorAll('.chip-del').forEach(el=>{
@@ -1200,6 +1721,8 @@ function addFieldToZone(zoneName, key, source){
   if(!pivotConfig.values.includes(pivotConfig.sortMetric)) pivotConfig.sortMetric = pivotConfig.values[0];
   document.querySelectorAll('.preset-btn').forEach(b=>b.classList.remove('active'));
   renderFieldZones();
+  renderDimFieldList();
+  renderValueFieldList();
   renderPivotTable();
 }
 
@@ -1210,6 +1733,8 @@ function removeFieldFromZone(zoneName, key){
   if(zoneName==='rows') delete pivotConfig.rowFilters[key];
   if(!pivotConfig.values.includes(pivotConfig.sortMetric)) pivotConfig.sortMetric = pivotConfig.values[0];
   renderFieldZones();
+  renderDimFieldList();
+  renderValueFieldList();
   renderPivotTable();
 }
 
@@ -1307,7 +1832,13 @@ async function openColumnPicker(){
 /* Row-level entry point: filter which values of a given row dimension appear */
 async function openRowValuePicker(dimKey){
   await openValuePicker(dimKey, [], pivotConfig.rowFilters[dimKey], (selected)=>{
-    pivotConfig.rowFilters[dimKey] = selected;
+    // Selecting every available value is the same as not filtering at all --
+    // store it as "no filter" rather than an explicit selection, otherwise
+    // this level would silently stop respecting Top N (see buildRowsAsync's
+    // showAll: any non-empty rowFilters entry disables the cap for that
+    // level, on the reasoning that an explicit pick shouldn't be re-capped --
+    // but "pick" here would just be "everything", not a real restriction).
+    pivotConfig.rowFilters[dimKey] = (selected.length >= valuePickerAllValues.length) ? null : selected;
     renderFieldZones();
     renderPivotTable();
   }, 'Choose which ' + pluralizeLabel(DIM_FIELDS[dimKey].label).toLowerCase() + ' to include');
@@ -1414,7 +1945,11 @@ async function buildRowsAsync(ancestorExtra, levels, colDim, colValues, path, le
   const dimKey = levels[levelIdx];
   const rowFilter = pivotConfig.rowFilters[dimKey];
   const showAllKey = path+'::'+levelIdx;
-  const showAll = showAllPaths.has(showAllKey) || !!(rowFilter && rowFilter.length); // an explicit filter selection shouldn't be re-capped by Top N
+  // Top N per level only caps the deepest row level (e.g. Outlet -> Category -> Item
+  // always lists every outlet and every category in full, capping only the items
+  // under each). A single-level view is its own leaf, so it still caps as expected.
+  const isLeafLevel = levelIdx === levels.length-1;
+  const showAll = !isLeafLevel || showAllPaths.has(showAllKey) || !!(rowFilter && rowFilter.length); // an explicit filter selection shouldn't be re-capped by Top N
   const limit = showAll ? null : pivotConfig.topN;
 
   const res = await API.aggregate({
@@ -1457,12 +1992,24 @@ async function buildRowsAsync(ancestorExtra, levels, colDim, colValues, path, le
   }
 }
 
+// Guards against an out-of-order response race: every call captures the
+// generation counter at the top, and skips applying its result if a NEWER
+// renderPivotTable() call has started (and so is presumably already headed
+// for the DOM) by the time this one's queries finish. Without this, a slow
+// stale request (e.g. the initial default-preset render, still in flight)
+// can resolve after a newer one (e.g. right after changing Top N) and
+// silently overwrite it with outdated rows -- worse the higher up the
+// hierarchy (fewer groups, so a faster query) you are, since there's more
+// time left for an even-older slower request to still land on top of it.
+let pivotRenderGen = 0;
+
 async function renderPivotTable(){
+  const myGen = ++pivotRenderGen;
   const wrapEl = document.getElementById('pivotTableWrap');
   try{
     const levels = pivotConfig.rows;
-    if(levels.length===0){ wrapEl.innerHTML='<p style="padding:20px;color:var(--text-dim)">Drag at least one field into Rows to begin.</p>'; lastPivotExport=null; return; }
-    if(pivotConfig.values.length===0){ wrapEl.innerHTML='<p style="padding:20px;color:var(--text-dim)">Drag at least one field into Values to begin.</p>'; lastPivotExport=null; return; }
+    if(levels.length===0){ if(myGen!==pivotRenderGen) return; wrapEl.innerHTML='<p style="padding:20px;color:var(--text-dim)">Drag at least one field into Rows to begin.</p>'; lastPivotExport=null; return; }
+    if(pivotConfig.values.length===0){ if(myGen!==pivotRenderGen) return; wrapEl.innerHTML='<p style="padding:20px;color:var(--text-dim)">Drag at least one field into Values to begin.</p>'; lastPivotExport=null; return; }
     const colDim = pivotConfig.columns[0];
     const colInfo = colDim ? await getColumnValues() : null;
     const colValues = colInfo ? colInfo.values : null;
@@ -1545,7 +2092,7 @@ async function renderPivotTable(){
       }
       const toggle = row.hasChildren ? `<span class="expand-toggle" data-path="${escapeAttr(row.path)}">${row.expanded?'▾':'▸'}</span>` : '<span class="expand-toggle"></span>';
       const rowCls = 'level-'+row.level + (row.dimKey==='item' ? ' item-row' : '');
-      html += `<tr class="${rowCls}"><td class="rowhead">${toggle}${escapeHtml(row.label)}</td>`;
+      html += `<tr class="${rowCls}"><td class="rowhead">${rowIndent(row.level)}${toggle}${escapeHtml(row.label)}</td>`;
       row.cells.forEach((c,i)=>{ html += `<td>${metricFmts[i%nMetrics](c)}</td>`; });
       if(colValues) row.totalCells.forEach((c,i)=>{ html += `<td class="total-group">${metricFmts[i](c)}</td>`; });
       html += '</tr>';
@@ -1556,12 +2103,14 @@ async function renderPivotTable(){
     if(colValues) grandTotalCells.forEach((c,i)=>{ html += `<td class="total-group">${metricFmts[i](c)}</td>`; });
     html += '</tr></tbody></table>';
 
+    if(myGen!==pivotRenderGen) return; // a newer render superseded this one while we were awaiting data — discard
     wrapEl.innerHTML = html;
     attachPivotRowHandlers();
     const chooseLink = document.getElementById('chooseColumnsLink');
     if(chooseLink) chooseLink.addEventListener('click', (e)=>{ e.preventDefault(); openColumnPicker(); });
   }catch(err){
     console.error('Pivot render error:', err);
+    if(myGen!==pivotRenderGen) return;
     wrapEl.innerHTML = '<p style="padding:20px;color:var(--brick)">Could not build this view with the current field combination. Try removing a field or picking a different one.</p>';
     lastPivotExport = null;
   }
@@ -1589,7 +2138,24 @@ function pluralizeLabel(label){
 }
 
 function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Real text (non-breaking spaces), not just CSS padding, so a row's hierarchy
+// level survives selecting the table and pasting it as plain text into Excel
+// — CSS padding-left is invisible once the DOM text is copied out.
+function rowIndent(level){ return '&nbsp;&nbsp;&nbsp;'.repeat(level); }
 function escapeAttr(s){ return String(s).replace(/"/g,'&quot;'); }
+
+// Marks the body with which page to print (see the @media print block) so
+// only that page's table prints full-width, landscape, with all the chrome
+// (header, filters, sidebar, buttons) hidden -- rather than printing
+// whatever happened to be on screen.
+function printSection(pageId){
+  const cls = 'printing-'+pageId;
+  document.body.classList.add('printing', cls);
+  const cleanup = ()=>{ document.body.classList.remove('printing', cls); window.removeEventListener('afterprint', cleanup); };
+  window.addEventListener('afterprint', cleanup);
+  window.print();
+  setTimeout(cleanup, 3000); // fallback for browsers that don't fire afterprint reliably
+}
 
 /* ============================================================
    EXPORT: CSV + Excel, from the current pivot view
@@ -1824,7 +2390,10 @@ async function buildHierarchyRowsAsync(reportFilters, ancestorExtra, path, level
   if(levelIdx >= REPORT_HIERARCHY.length) return;
   const dimKey = REPORT_HIERARCHY[levelIdx];
   const showAllKey = path+'::'+levelIdx;
-  const showAll = reportShowAllPaths.has(showAllKey);
+  // Top N per level only caps the deepest level (Item) -- Outlet, Category, Class and
+  // Sub-Class always list every one of their own rows in full.
+  const isLeafLevel = levelIdx === REPORT_HIERARCHY.length-1;
+  const showAll = !isLeafLevel || reportShowAllPaths.has(showAllKey);
   const limit = showAll ? null : reportTopN;
 
   const res = await API.aggregate({ filters: reportFilters, extra: ancestorExtra, groupBy: dimKey, limit, sortMetric:'sales', sortDir:'desc' });
@@ -1855,7 +2424,8 @@ async function buildHierarchyCompareRowsAsync(filtersA, filtersB, ancestorExtra,
   entries.sort((x,y)=>y.aSums.sales - x.aSums.sales);
 
   const showAllKey = path+'::'+levelIdx;
-  const showAll = reportShowAllPaths.has(showAllKey);
+  const isLeafLevel = levelIdx === REPORT_HIERARCHY.length-1;
+  const showAll = !isLeafLevel || reportShowAllPaths.has(showAllKey);
   const visible = showAll ? entries : entries.slice(0, reportTopN);
   const rest = showAll ? [] : entries.slice(reportTopN);
 
@@ -1886,7 +2456,15 @@ function attachReportRowHandlers(){
   });
 }
 
+// Same out-of-order-response guard as pivotRenderGen (see renderPivotTable),
+// applied across the Reports tab's render functions -- they share the exact
+// same risk: several inputs (dim, metric, as-of date, Top N, custom-date
+// pickers) each trigger a fresh renderReportsPage() call, and a slower
+// earlier request can otherwise resolve after a newer one and overwrite it.
+let reportRenderGen = 0;
+
 async function renderReportsPage(){
+  const myGen = ++reportRenderGen;
   const def = REPORT_DEFS[currentReport];
   document.getElementById('reportMetricRow').style.display = def.needsMetric ? '' : 'none';
   document.getElementById('reportDimRow').style.display = def.needsDim ? '' : 'none';
@@ -1899,12 +2477,13 @@ async function renderReportsPage(){
   const outEl = document.getElementById('reportOutput');
 
   try{
-    if(currentReport==='mtd' || currentReport==='ytd'){ await renderPeriodComparison(outEl); return; }
-    if(currentReport==='customdate'){ await renderCustomDateVariance(outEl); return; }
-    if(currentReport==='aboveavg'){ await renderAboveBelowAverage(outEl, dim, metric); return; }
+    if(currentReport==='mtd' || currentReport==='ytd'){ await renderPeriodComparison(outEl, myGen); return; }
+    if(currentReport==='customdate'){ await renderCustomDateVariance(outEl, myGen); return; }
+    if(currentReport==='aboveavg'){ await renderAboveBelowAverage(outEl, dim, metric, myGen); return; }
 
     const bf = baseFilters();
     const { grand } = await API.aggregate({ filters: bf });
+    if(myGen!==reportRenderGen) return;
     if(grand.count===0){
       outEl.innerHTML = '<p style="padding:20px;color:var(--text-dim)">No rows match this report for the current filters.</p>';
       lastReportExport = null;
@@ -1912,21 +2491,23 @@ async function renderReportsPage(){
     }
 
     if(currentReport==='outlet'){
-      await renderFlatOutletBreakdown(outEl, bf); return;
+      await renderFlatOutletBreakdown(outEl, bf, myGen); return;
     }
-    await renderHierarchyBreakdown(outEl, bf, def.name, currentReport==='margin');
+    await renderHierarchyBreakdown(outEl, bf, def.name, currentReport==='margin', myGen);
   }catch(err){
     console.error('Report render error:', err);
+    if(myGen!==reportRenderGen) return;
     outEl.innerHTML = '<p style="padding:20px;color:var(--brick)">Could not build this report. Try adjusting the filters.</p>';
     lastReportExport = null;
   }
 }
 
 /* Sales Report / Margin Comparison: Outlet -> Category -> Class -> Sub-Class -> Item drill-down */
-async function renderHierarchyBreakdown(outEl, reportFilters, title, colorByMargin){
+async function renderHierarchyBreakdown(outEl, reportFilters, title, colorByMargin, myGen){
   const rows = [];
   await buildHierarchyRowsAsync(reportFilters, [], '', 0, rows);
   const { grand } = await API.aggregate({ filters: reportFilters });
+  if(myGen!==undefined && myGen!==reportRenderGen) return;
   const metricsToShow = ['sales','cost','gp','gppct','qty','count'];
 
   let html = `<div class="report-title">${title}</div>`;
@@ -1946,7 +2527,7 @@ async function renderHierarchyBreakdown(outEl, reportFilters, title, colorByMarg
     const toggle = row.hasChildren
       ? `<span class="expand-toggle" data-path="${escapeAttr(row.path)}">${row.expanded?'▾':'▸'}</span>`
       : '<span class="expand-toggle"></span>';
-    html += `<tr class="${rowClass}"><td class="rowhead">${toggle}${escapeHtml(row.label)}</td>`;
+    html += `<tr class="${rowClass}"><td class="rowhead">${rowIndent(row.level)}${toggle}${escapeHtml(row.label)}</td>`;
     for(const m of metricsToShow) html += `<td>${getMetricDef(m).fmt(row.sums[m])}</td>`;
     html += '</tr>';
     exportRows.push(['  '.repeat(row.level)+row.label, ...metricsToShow.map(m=>row.sums[m])]);
@@ -1969,8 +2550,9 @@ async function renderHierarchyBreakdown(outEl, reportFilters, title, colorByMarg
 }
 
 /* Outlet Comparison: intentionally flat — a quick side-by-side glance across outlets only */
-async function renderFlatOutletBreakdown(outEl, reportFilters){
+async function renderFlatOutletBreakdown(outEl, reportFilters, myGen){
   const res = await API.aggregate({ filters: reportFilters, extra:[], groupBy:'outlet', limit:null, sortMetric:'gppct', sortDir:'desc' });
+  if(myGen!==undefined && myGen!==reportRenderGen) return;
   const rows = res.rows.map(r=>({ val:r.key, sums:r }));
   const grand = res.grand;
   const metricsToShow = ['sales','cost','gp','gppct','qty','count'];
@@ -2006,7 +2588,7 @@ function fmtShortRange(start,end){
   return start.toLocaleDateString('en-GB', opts)+' – '+end.toLocaleDateString('en-GB', opts);
 }
 
-async function renderPeriodComparison(outEl){
+async function renderPeriodComparison(outEl, myGen){
   const def = REPORT_DEFS[currentReport];
   const asOfStr = document.getElementById('report_asof').value;
   const asOf = asOfStr ? new Date(asOfStr+'T00:00:00') : getDataMaxDate();
@@ -2016,10 +2598,10 @@ async function renderPeriodComparison(outEl){
   await renderTwoPeriodComparison(outEl,
     periods.thisStart, periods.thisEnd, 'This Period',
     periods.priorStart, periods.priorEnd, 'Prior Year',
-    def.name, dateNote, 'Sales up vs prior year', 'Sales down vs prior year');
+    def.name, dateNote, 'Sales up vs prior year', 'Sales down vs prior year', myGen);
 }
 
-async function renderCustomDateVariance(outEl){
+async function renderCustomDateVariance(outEl, myGen){
   const aStartStr = document.getElementById('cdv_a_start').value;
   const aEndStr = document.getElementById('cdv_a_end').value;
   const bStartStr = document.getElementById('cdv_b_start').value;
@@ -2040,12 +2622,12 @@ async function renderCustomDateVariance(outEl){
   const labelB = fmtShortRange(bStart, bEnd);
   const dateNote = `Period A: ${fmtDate(aStart)} to ${fmtDate(aEnd)} — Period B: ${fmtDate(bStart)} to ${fmtDate(bEnd)}`;
   await renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bEnd, labelB,
-    'Custom Date Variance', dateNote, 'Period A higher', 'Period A lower');
+    'Custom Date Variance', dateNote, 'Period A higher', 'Period A lower', myGen);
 }
 
 /* Shared renderer: compares two arbitrary date periods, drilling Outlet -> Category -> Class -> Sub-Class -> Item,
    with variance ($, %) for Sales and GP, and point-variance for GP%. */
-async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bEnd, labelB, title, dateNote, aboveLegend, belowLegend){
+async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bEnd, labelB, title, dateNote, aboveLegend, belowLegend, myGen){
   const filtersA = filtersForRange(aStart, aEnd);
   const filtersB = filtersForRange(bStart, bEnd);
   const [aGrandRes, bGrandRes] = await Promise.all([
@@ -2054,6 +2636,7 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
   ]);
   const aGrand = aGrandRes.grand, bGrand = bGrandRes.grand;
 
+  if(myGen!==undefined && myGen!==reportRenderGen) return;
   if(aGrand.count===0 && bGrand.count===0){
     outEl.innerHTML = '<p style="padding:20px;color:var(--text-dim)">No rows in either period for the current filters.</p>';
     lastReportExport = null;
@@ -2062,6 +2645,7 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
 
   const rows = [];
   await buildHierarchyCompareRowsAsync(filtersA, filtersB, [], '', 0, rows);
+  if(myGen!==undefined && myGen!==reportRenderGen) return;
 
   function variance(curr, prior){
     const diff = curr - prior;
@@ -2079,12 +2663,12 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
 
   const exportRows = [];
   const colCount = 12;
-  function rowHtml(label, t, p, extraCls, toggle){
+  function rowHtml(label, t, p, extraCls, toggle, level){
     const sVar = variance(t.sales, p.sales);
     const gVar = variance(t.gp, p.gp);
     const gpVarPts = t.gppct - p.gppct;
     const trCls = extraCls || (sVar.diff>=0 ? 'above-avg' : 'below-avg');
-    let h = `<tr class="${trCls}"><td class="rowhead">${toggle||''}${escapeHtml(label)}</td>`;
+    let h = `<tr class="${trCls}"><td class="rowhead">${rowIndent(level||0)}${toggle||''}${escapeHtml(label)}</td>`;
     h += `<td>${fmtMoney(t.sales)}</td><td>${fmtMoney(p.sales)}</td><td>${sVar.diff>=0?'+':''}${fmtMoney(sVar.diff)}</td><td>${sVar.pct===null?'—':(sVar.pct>=0?'+':'')+fmtPct(sVar.pct)}</td>`;
     h += `<td>${fmtMoney(t.gp)}</td><td>${fmtMoney(p.gp)}</td><td>${gVar.diff>=0?'+':''}${fmtMoney(gVar.diff)}</td><td>${gVar.pct===null?'—':(gVar.pct>=0?'+':'')+fmtPct(gVar.pct)}</td>`;
     h += `<td class="total-group">${fmtPct(t.gppct)}</td><td class="total-group">${fmtPct(p.gppct)}</td><td class="total-group">${(gpVarPts>=0?'+':'')+(gpVarPts*100).toFixed(1)}pts</td>`;
@@ -2100,7 +2684,7 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
       ? `<span class="expand-toggle" data-path="${escapeAttr(row.path)}">${row.expanded?'▾':'▸'}</span>`
       : '<span class="expand-toggle"></span>';
     const itemCls = row.dimKey==='item' ? ' item-row' : '';
-    html += rowHtml(row.label, row.aSums, row.bSums, 'level-'+row.level+itemCls+' '+(row.aSums.sales-row.bSums.sales>=0?'above-avg':'below-avg'), toggle);
+    html += rowHtml(row.label, row.aSums, row.bSums, 'level-'+row.level+itemCls+' '+(row.aSums.sales-row.bSums.sales>=0?'above-avg':'below-avg'), toggle, row.level);
     exportRows.push(['  '.repeat(row.level)+row.label, row.aSums.sales, row.bSums.sales,
       row.aSums.sales-row.bSums.sales, row.bSums.sales!==0?(row.aSums.sales-row.bSums.sales)/row.bSums.sales:null,
       row.aSums.gp, row.bSums.gp, row.aSums.gp-row.bSums.gp, row.bSums.gp!==0?(row.aSums.gp-row.bSums.gp)/row.bSums.gp:null,
@@ -2126,8 +2710,9 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
   };
 }
 
-async function renderAboveBelowAverage(outEl, dim, metric){
+async function renderAboveBelowAverage(outEl, dim, metric, myGen){
   const res = await API.aggregate({ filters: baseFilters(), extra:[], groupBy: dim, limit: null });
+  if(myGen!==undefined && myGen!==reportRenderGen) return;
   if(res.rows.length===0){
     outEl.innerHTML = '<p style="padding:20px;color:var(--text-dim)">No rows match this report for the current filters.</p>';
     lastReportExport = null;
@@ -2180,6 +2765,13 @@ function switchTab(tabName){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===tabName));
   document.querySelectorAll('.page').forEach(p=>p.classList.toggle('hidden', p.id !== 'page-'+tabName));
   if(tabName==='reports') showReportsMenu();
+  // Charts created via Chart.js right as their container comes off
+  // display:none can measure a stale/wrong canvas width before the browser's
+  // next layout pass — a double rAF lets that layout settle first. This only
+  // matters on first activation of a tab that starts hidden (Dashboard's
+  // charts never hit this, since that tab is visible from page load).
+  if(tabName==='executive') requestAnimationFrame(()=>requestAnimationFrame(renderExecutiveTab));
+  if(tabName==='operations') requestAnimationFrame(()=>requestAnimationFrame(renderOperationsTab));
 }
 
 /* ============================================================
@@ -2194,6 +2786,8 @@ async function updateAll(){
   if(document.getElementById('page-reports') && !document.getElementById('page-reports').classList.contains('hidden')){
     renderReportsPage();
   }
+  if(!document.getElementById('page-executive').classList.contains('hidden')) renderExecutiveTab();
+  if(!document.getElementById('page-operations').classList.contains('hidden')) renderOperationsTab();
   document.getElementById('subtitleMeta').textContent =
     'Currency: AED   |   Showing '+grand.count.toLocaleString()+' of '+serverStatus.rows.toLocaleString()+' rows   |   '+
     (filters.dateFrom?fmtDate(filters.dateFrom):'')+' to '+(filters.dateTo?fmtDate(filters.dateTo):'');
@@ -2258,6 +2852,24 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   });
   document.getElementById('csvExportBtn').addEventListener('click', exportPivotCSV);
   document.getElementById('xlsxExportBtn').addEventListener('click', exportPivotXLSX);
+  document.getElementById('pivotPrintBtn').addEventListener('click', ()=>printSection('page-pivot'));
+
+  document.getElementById('fullWidthToggleBtn').addEventListener('click', (e)=>{
+    const ws = document.querySelector('.pivot-workspace');
+    const isFull = ws.classList.toggle('full-width');
+    e.currentTarget.classList.toggle('active', isFull);
+    e.currentTarget.textContent = isFull ? '⛶ Show Sidebar' : '⛶ Full Width';
+  });
+  document.querySelectorAll('.density-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('.density-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      const wrap = document.getElementById('pivotTableWrap');
+      wrap.classList.remove('density-compact','density-large');
+      if(btn.dataset.density==='compact') wrap.classList.add('density-compact');
+      if(btn.dataset.density==='large') wrap.classList.add('density-large');
+    });
+  });
 
   document.getElementById('saveLayoutBtn').addEventListener('click', saveCurrentLayout);
   document.getElementById('layoutSelect').addEventListener('change', (e)=>loadLayoutByName(e.target.value));
@@ -2305,6 +2917,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   });
   document.getElementById('reportCsvBtn').addEventListener('click', exportReportCSV);
   document.getElementById('reportXlsxBtn').addEventListener('click', exportReportXLSX);
+  document.getElementById('reportPrintBtn').addEventListener('click', ()=>printSection('page-reports'));
 
   document.getElementById('colPickAll').addEventListener('click', ()=>{
     valuePickerAllValues.forEach(v=>valuePickerChecked.add(v));

@@ -12,6 +12,10 @@ earlier (never a future date, which shouldn't exist anyway) — not just
 today's file — so if a previous day's cleanup ever failed to run, this
 self-heals instead of leaving old exports piling up.
 
+Every run is appended to delete_log.txt next to this script, in addition to
+printing to the console — Task Scheduler shows nothing on screen for a
+scheduled run, so the log file is the only way to see what happened.
+
 FOLDER / FILENAME_PATTERN here must match the same values in
 upload_daily.py — if you change the export's location or naming, update
 both scripts.
@@ -20,6 +24,7 @@ both scripts.
 import os
 import sys
 import glob
+import traceback
 from datetime import datetime
 
 # ============ CONFIG — keep in sync with upload_daily.py ============
@@ -28,6 +33,17 @@ FILENAME_PATTERN = "Sales_All_Branches_{date}.csv"   # {date} is YYYYMMDD
 # =======================================================================
 
 DATE_FORMAT = "%Y%m%d"
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delete_log.txt")
+
+
+def log(msg):
+    line = f"[{datetime.now()}] {msg}"
+    print(line)
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def extract_date(path, pattern):
@@ -46,8 +62,10 @@ def extract_date(path, pattern):
 
 
 def main():
+    log("--- delete_daily_export.py starting ---")
+
     if not os.path.isdir(FOLDER):
-        print(f"ERROR: folder not found: {FOLDER}")
+        log(f"ERROR: folder not found: {FOLDER}")
         sys.exit(1)
 
     glob_pattern = os.path.join(FOLDER, FILENAME_PATTERN.format(date="*"))
@@ -58,22 +76,28 @@ def main():
     for path in candidates:
         file_date = extract_date(path, FILENAME_PATTERN)
         if file_date is None:
-            print(f"SKIP (couldn't parse date): {os.path.basename(path)}")
+            log(f"SKIP (couldn't parse date): {os.path.basename(path)}")
             skipped += 1
             continue
         if file_date > today:
-            print(f"SKIP (future-dated, unexpected): {os.path.basename(path)}")
+            log(f"SKIP (future-dated, unexpected): {os.path.basename(path)}")
             skipped += 1
             continue
         try:
             os.remove(path)
-            print(f"[{datetime.now()}] Deleted {os.path.basename(path)}")
+            log(f"Deleted {os.path.basename(path)}")
             deleted += 1
         except OSError as e:
-            print(f"ERROR deleting {os.path.basename(path)}: {e}")
+            log(f"ERROR deleting {os.path.basename(path)}: {e}")
 
-    print(f"Done: {deleted} deleted, {skipped} skipped, {len(candidates)} total matched.")
+    log(f"Done: {deleted} deleted, {skipped} skipped, {len(candidates)} total matched.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        log("FATAL: unhandled exception:\n" + traceback.format_exc())
+        sys.exit(1)
