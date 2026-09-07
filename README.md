@@ -66,7 +66,30 @@ yet.
 | `create_scheduled_task.bat` | One-click helper to register the 05:00 upload task (run on the HO server) |
 | `delete_daily_export.py` | Runs on the HO server at 18:00, deletes the day's CSV(s) now that they're already in Railway |
 | `create_delete_task.bat` | One-click helper to register the 18:00 cleanup task (run on the HO server) |
+| `public/manifest.webmanifest` | PWA manifest — what makes the browser offer "Install app" |
+| `public/sw.js` | Service worker (required for installability) — caches the app shell only, never `/api/*` |
+| `public/icons/` | App icons for the install prompt, home screen, and taskbar |
 | `data/` | Local only, gitignored — the DuckDB file lives here; on Railway this should be a mounted Volume (see below) |
+
+### Installing the dashboard as an app
+
+The dashboard is a PWA (Progressive Web App) — once it's on Railway (HTTPS
+is required for this), open the URL and:
+
+- **Desktop Chrome/Edge**: an install icon (⊕ or a small monitor icon)
+  appears in the address bar — click it, or use the browser menu → "Install
+  Salem Mall BI…". It opens afterward in its own window, no browser
+  tabs/address bar, with a taskbar/dock icon.
+- **Android Chrome**: menu → "Add to Home Screen" / "Install app" (may also
+  prompt automatically after a couple of visits).
+- **iOS Safari**: Share button → "Add to Home Screen".
+
+It'll still ask for the dashboard password (`DASHBOARD_PASSWORD`) on first
+launch each time the browser's cached credentials expire — that's normal
+for a Basic-Auth-protected app and isn't something the install itself
+changes. The service worker only caches the static page shell, never
+`/api/*` — so the installed app never risks showing stale sales numbers,
+only (at most, and only if offline) a slightly stale *page*.
 
 ### The two-table data model
 

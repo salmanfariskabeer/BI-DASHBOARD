@@ -4,6 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Salem Mall — BI Dashboard</title>
+
+<!-- PWA: makes the browser offer "Install app" (Chrome/Edge address-bar icon,
+     Android "Add to Home Screen"). Requires this manifest + an icon set +
+     the service worker registered further down — see public/sw.js. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#14213D">
+<link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Salem Mall BI">
+<meta name="mobile-web-app-capable" content="yes">
+
 <style>
 :root{
   --ink:#14213D;
@@ -2936,6 +2949,15 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     if(e.target.id==='columnPickerModal') closeColumnPicker();
   });
 });
+
+// PWA install support. Registered after load so it never competes with the
+// dashboard's own startup for bandwidth/CPU. sw.js is deliberately
+// network-only for /api/*, so this can't ever cause stale data to be shown.
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('/sw.js').catch(err=>console.warn('Service worker registration failed:', err));
+  });
+}
 
 </script>
 </body>
