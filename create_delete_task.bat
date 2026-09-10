@@ -1,6 +1,11 @@
 @echo off
 REM ============================================================
 REM  create_delete_task.bat
+REM
+REM  PREFER create_delete_task.ps1 INSTEAD OF THIS FILE if you can -- see
+REM  the note at the top of create_scheduled_task.bat for why. Kept here
+REM  only as a fallback.
+REM
 REM  Registers a daily Windows Task that runs delete_daily_export.py at
 REM  18:00 — well after upload_daily.py has already pushed the day's file
 REM  to Railway at 05:00. Run this ONCE on the HO server by double-clicking

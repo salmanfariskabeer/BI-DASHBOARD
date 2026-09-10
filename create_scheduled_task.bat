@@ -1,6 +1,17 @@
 @echo off
 REM ============================================================
 REM  create_scheduled_task.bat
+REM
+REM  PREFER create_scheduled_task.ps1 INSTEAD OF THIS FILE if you can --
+REM  it registers a task that keeps running even if the HO server reboots
+REM  or nobody's logged in, and retries automatically on failure. A task
+REM  from THIS .bat file only runs while a user is actively logged into
+REM  the server -- if it reboots overnight and nobody logs back in before
+REM  05:00, that day's run is silently skipped. That's the single most
+REM  likely reason a "sometimes works, sometimes doesn't" scheduler was
+REM  reported. Kept here only as a fallback for machines where running a
+REM  .ps1 isn't practical.
+REM
 REM  Registers a daily Windows Task that runs upload_daily.py.
 REM  Run this ONCE on the HO server by double-clicking it (or right-click >
 REM  Run as administrator if it fails). Edit the TIME value below first —

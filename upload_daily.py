@@ -54,6 +54,7 @@ import gzip
 import shutil
 import tempfile
 import traceback
+import time
 from datetime import datetime
 
 # ============ CONFIG ============
@@ -191,19 +192,47 @@ def main():
 
     log(f"Uploading {upload_path} -> {upload_endpoint}")
 
+    # A 5am run can hit a genuinely transient problem -- the office link
+    # blipping, Railway mid-redeploy, a momentary DNS hiccup -- that has
+    # nothing to do with the file or the script and would succeed a minute
+    # later. Retrying here (fast, in-process) catches that without relying
+    # on Task Scheduler's own restart-on-failure (which also exists, see
+    # create_scheduled_task.ps1, as a second, slower layer of the same idea).
+    MAX_ATTEMPTS = 3
+    RETRY_DELAY_SECONDS = [20, 60]  # wait before attempt 2, then before attempt 3
+
     try:
-        with open(upload_path, "rb") as f:
-            # Streams the file straight from disk instead of buffering the
-            # whole multipart body in memory — requests' default files=
-            # encoding loads the entire file into RAM first, which can
-            # exhaust memory well before the 2GB server-side cap.
-            encoder = MultipartEncoder(fields={"file": (upload_name, f, content_type)})
-            headers = {"X-API-Key": API_KEY, "Content-Type": encoder.content_type}
+        resp = None
+        last_error = None
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                delay = RETRY_DELAY_SECONDS[attempt - 2]
+                log(f"Retrying in {delay}s (attempt {attempt}/{MAX_ATTEMPTS})...")
+                time.sleep(delay)
             try:
-                resp = requests.post(upload_endpoint, data=encoder, headers=headers, timeout=UPLOAD_TIMEOUT_SECONDS)
+                with open(upload_path, "rb") as f:
+                    # Streams the file straight from disk instead of
+                    # buffering the whole multipart body in memory --
+                    # requests' default files= encoding loads the entire
+                    # file into RAM first, which can exhaust memory well
+                    # before the 2GB server-side cap. Re-opened fresh each
+                    # attempt since a failed send leaves the handle at EOF.
+                    encoder = MultipartEncoder(fields={"file": (upload_name, f, content_type)})
+                    headers = {"X-API-Key": API_KEY, "Content-Type": encoder.content_type}
+                    resp = requests.post(upload_endpoint, data=encoder, headers=headers, timeout=UPLOAD_TIMEOUT_SECONDS)
+                if resp.status_code == 200 or (400 <= resp.status_code < 500):
+                    # Success, or an error retrying won't fix (bad file,
+                    # wrong API key, etc.) -- stop here either way.
+                    break
+                last_error = f"server responded {resp.status_code}: {resp.text}"
+                log(f"WARNING: {last_error}")
             except requests.exceptions.RequestException as e:
-                log(f"ERROR: could not reach server: {e}")
-                sys.exit(1)
+                last_error = str(e)
+                log(f"WARNING: could not reach server: {e}")
+                resp = None
+        if resp is None:
+            log(f"ERROR: could not reach server after {MAX_ATTEMPTS} attempts: {last_error}")
+            sys.exit(1)
     finally:
         if gz_path:
             os.unlink(gz_path)
