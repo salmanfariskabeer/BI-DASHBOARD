@@ -79,7 +79,14 @@ function buildWhere(filters, extra) {
   filters = filters || {};
   for (const key of BASE_FILTER_DIMS) {
     const val = filters[key];
-    if (val && val !== 'All') clauses.push(`${dimExpr(key)} = ${esc(val)}`);
+    if (Array.isArray(val)) {
+      // A tick-list filter (currently just Outlet) sends an explicit array
+      // of what's checked. Empty array means "nothing ticked" -- show zero
+      // rows, not silently fall back to unfiltered.
+      clauses.push(val.length ? `${dimExpr(key)} IN (${val.map(esc).join(',')})` : '1=0');
+    } else if (val && val !== 'All') {
+      clauses.push(`${dimExpr(key)} = ${esc(val)}`);
+    }
   }
   if (filters.dateFrom) clauses.push(`trandate >= ${esc(filters.dateFrom)}::DATE`);
   if (filters.dateTo) clauses.push(`trandate < ${esc(filters.dateTo)}::DATE + INTERVAL 1 DAY`);
@@ -150,6 +157,10 @@ async function ensureSchema() {
   await exec(`CREATE TABLE IF NOT EXISTS sales_history (${TABLE_SCHEMA_SQL})`);
   await exec(`CREATE TABLE IF NOT EXISTS sales_current (${TABLE_SCHEMA_SQL})`);
   await exec(`CREATE OR REPLACE VIEW sales AS SELECT * FROM sales_history UNION ALL SELECT * FROM sales_current`);
+  // Sales targets, set per (outlet, class) in the Settings page and read by
+  // the Target report. One row per outlet+class combination that has a
+  // target assigned — a combination with no row simply has no target set.
+  await exec(`CREATE TABLE IF NOT EXISTS targets (outlet VARCHAR, class_ VARCHAR, target_amount DOUBLE, updated_at TIMESTAMP)`);
 }
 
 /* ============================================================
@@ -266,6 +277,46 @@ app.post('/api/distinct', async (req, res) => {
       ORDER BY 1
     `);
     res.json({ values: rows.map((r) => r.v) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/*
+  Sales targets — set per (outlet, class) in Settings, read by the Target
+  report. Small table (a few dozen rows at most: outlets x classes), so a
+  plain "list everything" GET plus delete-then-insert upsert is plenty.
+*/
+app.get('/api/targets', async (req, res) => {
+  try {
+    const rows = await run(`SELECT outlet, class_, target_amount::DOUBLE AS target_amount FROM targets ORDER BY outlet, class_`);
+    res.json({ targets: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/targets', async (req, res) => {
+  try {
+    const { outlet, class_, target } = req.body || {};
+    if (!outlet || typeof outlet !== 'string') return res.status(400).json({ error: 'outlet is required' });
+    if (!class_ || typeof class_ !== 'string') return res.status(400).json({ error: 'class_ is required' });
+    const num = Number(target);
+    if (!isFinite(num) || num < 0) return res.status(400).json({ error: 'target must be a non-negative number' });
+    await exec(`DELETE FROM targets WHERE outlet = ${esc(outlet)} AND class_ = ${esc(class_)}`);
+    await exec(`INSERT INTO targets VALUES (${esc(outlet)}, ${esc(class_)}, ${num}, now())`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/targets', async (req, res) => {
+  try {
+    const { outlet, class_ } = req.body || {};
+    if (!outlet || !class_) return res.status(400).json({ error: 'outlet and class_ are required' });
+    await exec(`DELETE FROM targets WHERE outlet = ${esc(outlet)} AND class_ = ${esc(class_)}`);
+    res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

@@ -143,6 +143,38 @@ body{min-height:100vh;}
   border-radius:2px;
 }
 .filter-group select:focus, .filter-group input:focus{outline:2px solid var(--brass); outline-offset:1px;}
+
+/* ---------- Outlet multi-select (tick which outlets to include) ---------- */
+.multiselect{position:relative;}
+.multiselect-btn{
+  border:1px solid var(--line); background:var(--paper); padding:6px 10px;
+  font-size:13px; font-family:var(--sans); color:var(--text); min-width:150px;
+  border-radius:2px; text-align:left; cursor:pointer; display:flex; align-items:center;
+  justify-content:space-between; gap:8px; white-space:nowrap;
+}
+.multiselect-btn::after{content:'▾'; font-size:10px; color:var(--text-dim); flex:none;}
+.multiselect-btn:focus{outline:2px solid var(--brass); outline-offset:1px;}
+.multiselect-panel{
+  position:absolute; top:calc(100% + 4px); left:0; z-index:100;
+  background:var(--card); border:1px solid var(--line); border-radius:2px;
+  min-width:220px; max-width:320px; box-shadow:0 4px 16px rgba(20,33,61,0.18);
+}
+.multiselect-actions{
+  display:flex; gap:6px; padding:8px; border-bottom:1px solid var(--line);
+}
+.multiselect-actions button{
+  flex:1; border:1px solid var(--line); background:var(--paper); color:var(--text);
+  font-size:11px; padding:4px 8px; border-radius:2px; cursor:pointer; font-family:var(--sans);
+}
+.multiselect-actions button:hover{border-color:var(--brass); color:var(--ink);}
+.multiselect-list{max-height:260px; overflow-y:auto; padding:4px 0;}
+.multiselect-item{
+  display:flex; align-items:center; gap:8px; padding:6px 12px; font-size:13px;
+  cursor:pointer; color:var(--text);
+}
+.multiselect-item:hover{background:var(--paper);}
+.multiselect-item input{margin:0; flex:none;}
+
 .reset-btn{
   border:1px solid var(--brick);
   color:var(--brick);
@@ -587,6 +619,8 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
   .filterbar{ padding:12px; gap:10px; }
   .filter-group{ flex:1 1 calc(50% - 5px); }
   .filter-group select, .filter-group input[type=date]{ min-width:0; width:100%; }
+  .multiselect-btn{ min-width:0; width:100%; }
+  .multiselect-panel{ left:0; right:0; max-width:none; }
   .reset-btn{ flex:1 1 100%; }
   .kpi-grid, .hero-kpi-grid{ grid-template-columns:1fr; }
   .rank-list .rank-bar-track{ width:56px; }
@@ -673,7 +707,18 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
 
     <div class="sticky-controls">
       <div class="filterbar">
-        <div class="filter-group"><label>Outlet</label><select id="f_outlet"></select></div>
+        <div class="filter-group"><label>Outlet</label>
+          <div class="multiselect" id="f_outlet_wrap">
+            <button type="button" class="multiselect-btn" id="f_outlet_btn">All Outlets</button>
+            <div class="multiselect-panel hidden" id="f_outlet_panel">
+              <div class="multiselect-actions">
+                <button type="button" id="f_outlet_all">All</button>
+                <button type="button" id="f_outlet_none">None</button>
+              </div>
+              <div class="multiselect-list" id="f_outlet_list"></div>
+            </div>
+          </div>
+        </div>
         <div class="filter-group"><label>Category</label><select id="f_category"></select></div>
         <div class="filter-group"><label>Class</label><select id="f_class"></select></div>
         <div class="filter-group"><label>Supplier</label><select id="f_supplier"></select></div>
@@ -688,6 +733,7 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
         <button class="tab-btn" data-tab="operations">Operations</button>
         <button class="tab-btn" data-tab="pivot">Pivot Builder</button>
         <button class="tab-btn" data-tab="reports">Reports</button>
+        <button class="tab-btn" data-tab="settings">Settings</button>
       </div>
     </div>
 
@@ -896,6 +942,17 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
       </div>
     </div>
 
+    <!-- ===================== SETTINGS PAGE ===================== -->
+    <div class="page hidden" id="page-settings">
+      <div class="report-title" style="margin-bottom:14px;">Assign Target</div>
+      <p class="pivot-note" style="margin:0 0 14px;">Set a sales target for each class within an outlet. These feed the
+        <b>Target vs Actual</b> report under Reports. A blank field means no target is set for that class.</p>
+      <div class="filterbar" style="margin-bottom:18px;">
+        <div class="filter-group"><label>Outlet</label><select id="settings_outlet"></select></div>
+      </div>
+      <div id="settingsTargetsWrap"></div>
+    </div>
+
   </div>
 </div>
 
@@ -1040,6 +1097,18 @@ const API = {
       fd.append('file', file);
       xhr.send(fd);
     });
+  },
+  async getTargets(){
+    const res = await fetch('/api/targets');
+    if(!res.ok) throw new Error('Could not load targets');
+    return (await res.json()).targets;
+  },
+  saveTarget(outlet, class_, target){ return API._post('/api/targets', { outlet, class_, target }); },
+  async deleteTarget(outlet, class_){
+    const res = await fetch('/api/targets', { method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({outlet, class_}) });
+    const json = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(json.error || 'Could not delete target');
+    return json;
   }
 };
 
@@ -1221,13 +1290,21 @@ async function afterDataLoaded(){
    FILTERS
    ============================================================ */
 async function populateFilterOptions(){
-  const outletSel = document.getElementById('f_outlet');
+  const outletVals = await API.distinct('outlet', {});
+  renderOutletMultiSelect(outletVals);
+  await populateCascadingFilters();
+}
+
+// Category/Class/Supplier dropdowns cascade off the current outlet
+// selection. Split out from populateFilterOptions() specifically so
+// toggling outlet checkboxes never re-fetches/re-renders the outlet list
+// itself mid-interaction — rebuilding those checkboxes out from under an
+// in-progress click was a real race (rapid toggles could silently lose
+// clicks, or leave the filter not actually applied).
+async function populateCascadingFilters(){
   const catSel = document.getElementById('f_category');
   const classSel = document.getElementById('f_class');
   const supSel = document.getElementById('f_supplier');
-
-  const outletVals = await API.distinct('outlet', {});
-  fillSelect(outletSel, ['All', ...outletVals], filters.outlet);
 
   const outletOnly = filters.outlet!=='All' ? {outlet:filters.outlet} : {};
   const catVals = await API.distinct('category', outletOnly);
@@ -1251,8 +1328,65 @@ function fillSelect(sel, values, current){
   if(!values.includes(current)) sel.value = 'All';
 }
 
+/* ---------- Outlet multi-select ("tick which outlets to include") ----------
+   filters.outlet is either the string 'All' (no filter — the default, and
+   what "every outlet ticked" collapses back to) or an array of the
+   currently-ticked outlet names. An empty array means "none ticked" and
+   deliberately shows zero rows, rather than silently falling back to All —
+   that's the one state a tick-list has to represent honestly. */
+function outletButtonLabel(allOutlets){
+  if(filters.outlet==='All') return 'All Outlets';
+  if(!Array.isArray(filters.outlet) || filters.outlet.length===0) return 'No Outlets Selected';
+  if(filters.outlet.length===allOutlets.length) return 'All Outlets';
+  if(filters.outlet.length===1) return filters.outlet[0];
+  return filters.outlet.length+' Outlets Selected';
+}
+
+function renderOutletMultiSelect(allOutlets){
+  const btn = document.getElementById('f_outlet_btn');
+  const list = document.getElementById('f_outlet_list');
+  const checkedSet = filters.outlet==='All' ? new Set(allOutlets) : new Set(filters.outlet);
+  list.innerHTML = allOutlets.map(o=>`
+    <label class="multiselect-item">
+      <input type="checkbox" value="${escapeAttr(o)}" ${checkedSet.has(o)?'checked':''}>
+      ${escapeHtml(o)}
+    </label>`).join('') || '<div class="multiselect-item" style="color:var(--text-dim);cursor:default;">No outlets found</div>';
+  btn.textContent = outletButtonLabel(allOutlets);
+  list.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.addEventListener('change', ()=>onOutletSelectionChange(allOutlets));
+  });
+}
+
+// Debounced: ticking several outlets quickly would otherwise fire one full
+// refetch (KPIs + charts + pivot + cascading dropdowns) per checkbox,
+// overlapping calls that queue up behind each other on the server's single
+// DB connection and make everything feel stuck. Only the button
+// label/checked state update immediately; the actual data refresh waits
+// until 300ms after the last change.
+let outletChangeDebounceTimer = null;
+function onOutletSelectionChange(allOutlets){
+  const list = document.getElementById('f_outlet_list');
+  const checked = [...list.querySelectorAll('input[type=checkbox]:checked')].map(cb=>cb.value);
+  filters.outlet = (checked.length===allOutlets.length) ? 'All' : checked;
+  document.getElementById('f_outlet_btn').textContent = outletButtonLabel(allOutlets);
+  clearTimeout(outletChangeDebounceTimer);
+  outletChangeDebounceTimer = setTimeout(async ()=>{
+    await populateCascadingFilters();
+    await updateAll();
+  }, 300);
+}
+
+async function setAllOutlets(checked){
+  const list = document.getElementById('f_outlet_list');
+  const all = [...list.querySelectorAll('input[type=checkbox]')];
+  all.forEach(cb=>{ cb.checked = checked; });
+  filters.outlet = checked ? 'All' : [];
+  document.getElementById('f_outlet_btn').textContent = outletButtonLabel(all.map(cb=>cb.value));
+  await populateCascadingFilters();
+  await updateAll();
+}
+
 async function onFilterChange(){
-  filters.outlet = document.getElementById('f_outlet').value;
   filters.category = document.getElementById('f_category').value;
   filters.class_ = document.getElementById('f_class').value;
   filters.supplier = document.getElementById('f_supplier').value;
@@ -2298,6 +2432,7 @@ const REPORT_DEFS = {
   ytd:        { name:'YTD Report',             desc:'Year to date vs the same period last year, with variance, drillable.', needsDim:false,  needsMetric:false, needsDate:true,  needsCustomDate:false },
   customdate: { name:'Custom Date Variance',   desc:'Compare any two date ranges you choose — e.g. last week vs the week before. Drillable.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:true },
   aboveavg:   { name:'Above / Below Average',  desc:'Rank everything in a dimension against its own average.', needsDim:true,  needsMetric:true,  needsDate:false, needsCustomDate:false },
+  target:     { name:'Target vs Actual',       desc:'Sales targets by outlet and class, vs actual — set targets in Settings.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:false },
 };
 let currentReport = 'sales';
 let lastReportExport = null;
@@ -2484,7 +2619,7 @@ async function renderReportsPage(){
   document.getElementById('reportDateRow').style.display = def.needsDate ? '' : 'none';
   document.getElementById('reportCustomDateRow').style.display = def.needsCustomDate ? '' : 'none';
   document.getElementById('cdvQuickPresets').style.display = def.needsCustomDate ? '' : 'none';
-  document.getElementById('reportTopNRow').style.display = (currentReport==='outlet'||currentReport==='aboveavg') ? 'none' : '';
+  document.getElementById('reportTopNRow').style.display = (currentReport==='outlet'||currentReport==='aboveavg'||currentReport==='target') ? 'none' : '';
   const dim = def.needsDim ? (document.getElementById('report_dim').value || 'category') : 'outlet';
   const metric = document.getElementById('report_metric').value || 'sales';
   const outEl = document.getElementById('reportOutput');
@@ -2493,6 +2628,7 @@ async function renderReportsPage(){
     if(currentReport==='mtd' || currentReport==='ytd'){ await renderPeriodComparison(outEl, myGen); return; }
     if(currentReport==='customdate'){ await renderCustomDateVariance(outEl, myGen); return; }
     if(currentReport==='aboveavg'){ await renderAboveBelowAverage(outEl, dim, metric, myGen); return; }
+    if(currentReport==='target'){ await renderTargetReport(outEl, myGen); return; }
 
     const bf = baseFilters();
     const { grand } = await API.aggregate({ filters: bf });
@@ -2759,6 +2895,106 @@ async function renderAboveBelowAverage(outEl, dim, metric, myGen){
   };
 }
 
+/* ============================================================
+   TARGET VS ACTUAL — targets are set per (outlet, class) in Settings and
+   stored server-side; this report joins them against actual sales.
+   Outlet rows show the WHOLE outlet's actual sales (every class, targeted
+   or not) against the sum of only the classes that outlet actually has
+   targets for -- so an outlet with no targets set yet still shows its real
+   sales total, just with no target/%% to compare against. Expanding an
+   outlet shows the per-class breakdown, including classes with a target
+   but zero sales, and classes with sales but no target assigned.
+   ============================================================ */
+function targetVarianceCell(target, actual){
+  if(target==null) return '<span style="color:var(--text-dim)">—</span>';
+  if(actual>=target) return `<span style="color:var(--green)">+${fmtMoney(actual-target)} over</span>`;
+  return `${fmtMoney(target-actual)} needed`;
+}
+
+async function renderTargetReport(outEl, myGen){
+  const bf = baseFilters();
+  const [outletRes, allTargets] = await Promise.all([
+    API.aggregate({ filters: bf, extra:[], groupBy:'outlet', limit:null, sortMetric:'sales', sortDir:'desc' }),
+    API.getTargets(),
+  ]);
+  if(myGen!==undefined && myGen!==reportRenderGen) return;
+
+  if(outletRes.rows.length===0){
+    outEl.innerHTML = '<p style="padding:20px;color:var(--text-dim)">No rows match this report for the current filters.</p>';
+    lastReportExport = null;
+    return;
+  }
+
+  const targetsByOutlet = new Map();
+  for(const t of allTargets){
+    if(!targetsByOutlet.has(t.outlet)) targetsByOutlet.set(t.outlet, new Map());
+    targetsByOutlet.get(t.outlet).set(t.class_, t.target_amount);
+  }
+
+  const rows = [];
+  const exportRows = [];
+  let grandTarget = 0, grandActual = 0, anyTarget = false;
+
+  for(const r of outletRes.rows){
+    const outletTargets = targetsByOutlet.get(r.key) || new Map();
+    const outletTargetSum = outletTargets.size ? [...outletTargets.values()].reduce((a,b)=>a+b,0) : null;
+    if(outletTargetSum!=null){ grandTarget += outletTargetSum; anyTarget = true; }
+    grandActual += r.sales;
+
+    const path = '>>outlet:'+r.key;
+    const expanded = reportExpandedPaths.has(path);
+    rows.push({ level:0, label:r.key, path, target:outletTargetSum, actual:r.sales, hasChildren:true, expanded });
+    exportRows.push([r.key, outletTargetSum, r.sales, outletTargetSum?r.sales/outletTargetSum:null, outletTargetSum!=null?outletTargetSum-r.sales:null]);
+
+    if(expanded){
+      const classRes = await API.aggregate({ filters: bf, extra:[{dim:'outlet', values:[r.key]}], groupBy:'class_', limit:null, sortMetric:'sales', sortDir:'desc' });
+      if(myGen!==undefined && myGen!==reportRenderGen) return;
+      const actualByClass = new Map(classRes.rows.map(cr=>[cr.key, cr.sales]));
+      const allClassKeys = new Set([...actualByClass.keys(), ...outletTargets.keys()]);
+      const classEntries = [...allClassKeys].map(k=>({
+        key:k, actual: actualByClass.get(k)||0, target: outletTargets.has(k) ? outletTargets.get(k) : null,
+      }));
+      classEntries.sort((a,b)=> (b.target ?? -1) - (a.target ?? -1) || b.actual - a.actual);
+      for(const ce of classEntries){
+        rows.push({ level:1, label:ce.key, target:ce.target, actual:ce.actual, hasChildren:false });
+        exportRows.push(['  '+ce.key, ce.target, ce.actual, ce.target?ce.actual/ce.target:null, ce.target!=null?ce.target-ce.actual:null]);
+      }
+    }
+  }
+
+  const grandPct = grandTarget ? grandActual/grandTarget : null;
+
+  let html = '<div class="report-title">Target vs Actual</div>';
+  if(!anyTarget){
+    html += '<p class="pivot-note">No targets set yet — go to Settings → Assign Target to set one for each outlet/class you want to track.</p>';
+  }
+  html += '<table class="pivot"><thead><tr><th class="rowhead">Outlet / Class</th><th>Target (AED)</th><th>Actual Sales (AED)</th><th>Achievement %</th><th>Variance to Target</th></tr></thead><tbody>';
+  for(const row of rows){
+    const pct = row.target ? row.actual/row.target : null;
+    const rowCls = 'level-'+row.level + (row.target!=null ? (row.actual>=row.target?' above-avg':' below-avg') : '');
+    const toggle = row.hasChildren ? `<span class="expand-toggle" data-path="${escapeAttr(row.path)}">${row.expanded?'▾':'▸'}</span>` : '<span class="expand-toggle"></span>';
+    html += `<tr class="${rowCls}"><td class="rowhead">${toggle}${escapeHtml(row.label)}</td>`;
+    html += `<td>${row.target!=null?fmtMoney(row.target):'—'}</td>`;
+    html += `<td>${fmtMoney(row.actual)}</td>`;
+    html += `<td>${pct!=null?fmtPct(pct):'—'}</td>`;
+    html += `<td>${targetVarianceCell(row.target, row.actual)}</td>`;
+    html += '</tr>';
+  }
+  html += `<tr class="total-row"><td class="rowhead">Grand Total</td><td>${grandTarget?fmtMoney(grandTarget):'—'}</td><td>${fmtMoney(grandActual)}</td><td>${grandPct!=null?fmtPct(grandPct):'—'}</td><td>${targetVarianceCell(grandTarget||null, grandActual)}</td></tr>`;
+  html += '</tbody></table>';
+  html += '<p class="report-legend"><span class="legend-dot above"></span> At/above target &nbsp; <span class="legend-dot below"></span> Below target</p>';
+  html += '<p class="pivot-note">Click ▸ to see the class breakdown for an outlet.</p>';
+  outEl.innerHTML = html;
+  attachReportRowHandlers();
+
+  lastReportExport = {
+    headers: ['Outlet / Class','Target (AED)','Actual Sales (AED)','Achievement %','Variance to Target (AED)'],
+    rows: exportRows,
+    grandRow: ['Grand Total', grandTarget||null, grandActual, grandPct, grandTarget?grandTarget-grandActual:null],
+    colTypes: ['text','money','money','percent','money'],
+  };
+}
+
 function exportReportCSV(){
   if(!lastReportExport){ return; }
   const allRows = [lastReportExport.headers, ...lastReportExport.rows, ...(lastReportExport.grandRow&&lastReportExport.grandRow.length?[lastReportExport.grandRow]:[])];
@@ -2785,6 +3021,77 @@ function switchTab(tabName){
   // charts never hit this, since that tab is visible from page load).
   if(tabName==='executive') requestAnimationFrame(()=>requestAnimationFrame(renderExecutiveTab));
   if(tabName==='operations') requestAnimationFrame(()=>requestAnimationFrame(renderOperationsTab));
+  if(tabName==='settings') renderSettingsPage();
+}
+
+/* ============================================================
+   SETTINGS — Assign Target (per outlet, per class)
+   ============================================================ */
+async function renderSettingsPage(){
+  const outletSel = document.getElementById('settings_outlet');
+  if(!outletSel.dataset.loaded){
+    const outlets = await API.distinct('outlet', {});
+    outletSel.innerHTML = outlets.map(o=>`<option value="${escapeAttr(o)}">${escapeHtml(o)}</option>`).join('');
+    outletSel.dataset.loaded = '1';
+    outletSel.addEventListener('change', renderSettingsTargetsTable);
+  }
+  await renderSettingsTargetsTable();
+}
+
+async function renderSettingsTargetsTable(){
+  const outlet = document.getElementById('settings_outlet').value;
+  const wrap = document.getElementById('settingsTargetsWrap');
+  if(!outlet){ wrap.innerHTML = '<p style="padding:20px;color:var(--text-dim)">No outlets found — load data first.</p>'; return; }
+  wrap.innerHTML = '<p style="padding:20px;color:var(--text-dim)">Loading…</p>';
+
+  const [classes, allTargets] = await Promise.all([
+    API.distinct('class_', { outlet }),
+    API.getTargets(),
+  ]);
+  const targetMap = new Map(allTargets.filter(t=>t.outlet===outlet).map(t=>[t.class_, t.target_amount]));
+
+  let html = `<table class="pivot"><thead><tr><th class="rowhead">Class</th><th>Target (AED)</th><th></th></tr></thead><tbody>`;
+  for(const c of classes){
+    const val = targetMap.has(c) ? targetMap.get(c) : '';
+    html += `<tr><td class="rowhead">${escapeHtml(c)}</td>
+      <td><input type="number" min="0" step="0.01" class="target-input" data-class="${escapeAttr(c)}" value="${val}"
+        style="width:160px;padding:6px 10px;border:1px solid var(--line);border-radius:2px;font-family:var(--sans);font-size:13px;"></td>
+      <td><span class="target-status" data-class="${escapeAttr(c)}" style="font-size:11px;"></span></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  if(classes.length===0) html = '<p style="padding:20px;color:var(--text-dim)">No classes found for this outlet.</p>';
+  wrap.innerHTML = html;
+
+  wrap.querySelectorAll('.target-input').forEach(input=>{
+    input.addEventListener('change', ()=>saveOneTarget(outlet, input));
+  });
+}
+
+async function saveOneTarget(outlet, input){
+  const cls = input.dataset.class;
+  const wrap = document.getElementById('settingsTargetsWrap');
+  const statusEl = wrap.querySelector(`.target-status[data-class="${CSS.escape(cls)}"]`);
+  const raw = input.value.trim();
+  const setStatus = (msg, color)=>{
+    if(!statusEl) return;
+    statusEl.textContent = msg; statusEl.style.color = color;
+    clearTimeout(statusEl._t);
+    statusEl._t = setTimeout(()=>{ statusEl.textContent=''; }, 2500);
+  };
+  try{
+    if(raw===''){
+      await API.deleteTarget(outlet, cls);
+      setStatus('Cleared', 'var(--text-dim)');
+    } else {
+      const num = Number(raw);
+      if(!isFinite(num) || num<0) throw new Error('Enter a non-negative number');
+      await API.saveTarget(outlet, cls, num);
+      setStatus('Saved ✓', 'var(--green)');
+    }
+  }catch(err){
+    setStatus('Error: '+err.message, 'var(--brick)');
+  }
 }
 
 /* ============================================================
@@ -2849,10 +3156,21 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     setStatus('Could not reach the server.', 'err');
   }
 
-  ['f_outlet','f_category','f_class','f_supplier','dateFrom','dateTo'].forEach(id=>{
+  ['f_category','f_class','f_supplier','dateFrom','dateTo'].forEach(id=>{
     document.getElementById(id).addEventListener('change', onFilterChange);
   });
   document.getElementById('resetFiltersBtn').addEventListener('click', resetFilters);
+
+  document.getElementById('f_outlet_btn').addEventListener('click', (e)=>{
+    e.stopPropagation();
+    document.getElementById('f_outlet_panel').classList.toggle('hidden');
+  });
+  document.getElementById('f_outlet_all').addEventListener('click', ()=>setAllOutlets(true));
+  document.getElementById('f_outlet_none').addEventListener('click', ()=>setAllOutlets(false));
+  document.addEventListener('click', (e)=>{
+    const wrap = document.getElementById('f_outlet_wrap');
+    if(wrap && !wrap.contains(e.target)) document.getElementById('f_outlet_panel').classList.add('hidden');
+  });
 
   document.querySelectorAll('.tab-btn').forEach(b=>{
     b.addEventListener('click', ()=>switchTab(b.dataset.tab));

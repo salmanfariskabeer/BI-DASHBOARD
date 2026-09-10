@@ -296,6 +296,35 @@ Manual drag-and-drop/file-picker upload on the dashboard still works too
 (e.g. for ad-hoc testing), and there's a **⟳ Refresh from server** button to
 re-check without a full page reload.
 
+## Sales targets: Settings page + Target vs Actual report
+
+**Settings → Assign Target**: pick an outlet, then set a target amount for
+each class within it (blank = no target for that class). Saves per-field as
+you tab/click away — no separate "Save" button, no Save-and-lose-your-place.
+
+**Reports → Target vs Actual**: one row per outlet — its target (the sum of
+whichever classes have one set) against its *whole* actual sales (every
+class, targeted or not), with achievement % and how much more is needed (or
+how far over) to hit it. Click ▸ to drill into an outlet and see the same
+breakdown per class — including classes with sales but no target set
+(shown with actual sales but a blank target/%, so nothing's hidden), and
+classes with a target but zero sales (shown as 100% still needed). Exports
+to CSV/Excel like every other report.
+
+Respects the global date filter like everything else — "actual" always
+means actual sales in whatever date range is currently selected, so this
+report answers "vs. target, how's this month/quarter/custom range going,"
+not a fixed period baked into the target itself.
+
+## Outlet filter: tick which ones to include
+
+The Outlet filter (top filter bar) is a checkbox dropdown, not a
+single-select — tick/untick any combination of outlets, with **All**/**None**
+shortcuts. Unticking everything shows zero rows (not a silent fallback to
+"all") — that's the one state a tick-list has to represent honestly, so
+"the dashboard looks empty" there means exactly what it looks like.
+Category/Class/Supplier filters remain single-select.
+
 ## Things worth knowing
 
 - **Troubleshooting a missed day**: check two things — `upload_log.txt`
