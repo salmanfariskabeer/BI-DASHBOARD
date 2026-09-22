@@ -189,6 +189,38 @@ body{min-height:100vh;}
 }
 .reset-btn:hover{background:var(--brick); color:#fff;}
 
+/* ---------- Install app button ---------- */
+.install-btn{
+  display:inline-flex; align-items:center; gap:7px;
+  border:1px solid var(--brass);
+  background:linear-gradient(180deg, var(--brass) 0%, #93701F 100%);
+  color:#fff;
+  padding:7px 16px 7px 13px;
+  font-size:12px; font-weight:600; letter-spacing:0.2px;
+  cursor:pointer; border-radius:2px; font-family:var(--sans);
+  height:32px;
+  box-shadow:0 1px 3px rgba(0,0,0,0.25);
+  transition:transform .12s ease, box-shadow .12s ease, background .12s ease;
+  animation:installPulse 2.4s ease-in-out 3;
+}
+.install-btn svg{width:14px; height:14px; flex:none;}
+.install-btn:hover{ transform:translateY(-1px); box-shadow:0 3px 8px rgba(0,0,0,0.3); background:linear-gradient(180deg, #BC9440 0%, var(--brass) 100%); }
+.install-btn:active{ transform:translateY(0); box-shadow:0 1px 2px rgba(0,0,0,0.25); }
+.install-btn:disabled{ opacity:0.6; cursor:default; transform:none; }
+@keyframes installPulse{
+  0%, 100%{ box-shadow:0 1px 3px rgba(0,0,0,0.25); }
+  50%{ box-shadow:0 1px 3px rgba(0,0,0,0.25), 0 0 0 5px rgba(169,129,47,0.25); }
+}
+.install-steps{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px; }
+.install-steps li{
+  display:flex; align-items:flex-start; gap:10px; font-size:13px; line-height:1.5; color:var(--text);
+}
+.install-steps .n{
+  flex:none; width:20px; height:20px; border-radius:50%; background:var(--ink); color:#fff;
+  font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; margin-top:1px;
+}
+.install-steps .icon-inline{ font-size:14px; }
+
 /* ---------- KPI Cards ---------- */
 .kpi-grid{
   display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:22px;
@@ -694,6 +726,10 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
     <div class="upload-progress-track"><div class="upload-progress-bar" id="uploadProgressBar"></div></div>
   </div>
   <button class="reset-btn" id="refreshFromServerBtn" style="color:#fff;border-color:rgba(255,255,255,0.35)">⟳ Refresh from server</button>
+  <button class="install-btn hidden" id="installAppBtn" title="Install as an app — opens instantly, its own window, no browser bar">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Install App
+  </button>
   <span class="status" id="loadStatus">Checking server…</span>
 </div>
 
@@ -956,6 +992,20 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
   </div>
 </div>
 
+
+<div class="modal-overlay hidden" id="iosInstallModal">
+  <div class="modal-box" style="width:340px">
+    <h3>Install Salem Mall BI</h3>
+    <ol class="install-steps">
+      <li><span class="n">1</span><span>Tap the <b>Share</b> button <span class="icon-inline">⎋</span> in Safari's toolbar</span></li>
+      <li><span class="n">2</span><span>Scroll down and tap <b>Add to Home Screen</b></span></li>
+      <li><span class="n">3</span><span>Tap <b>Add</b> — the dashboard opens like an app, full-screen, with its own icon</span></li>
+    </ol>
+    <div class="modal-actions">
+      <button class="layout-btn" id="iosInstallClose">Got it</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal-overlay hidden" id="columnPickerModal">
   <div class="modal-box">
@@ -3276,6 +3326,52 @@ if('serviceWorker' in navigator){
     navigator.serviceWorker.register('/sw.js').catch(err=>console.warn('Service worker registration failed:', err));
   });
 }
+
+// ---------- Install App button ----------
+// Chrome/Edge/Android fire `beforeinstallprompt` only when their own
+// installability checks pass (manifest + service worker + HTTPS + some
+// engagement) — we capture that event and re-trigger it from our own
+// visible button instead of relying on people noticing the tiny address-bar
+// icon. iOS Safari never fires that event at all (Apple doesn't support
+// it), so there we just show tap-by-tap instructions instead.
+(function initInstallButton(){
+  const installBtn = document.getElementById('installAppBtn');
+  const iosModal = document.getElementById('iosInstallModal');
+  const iosClose = document.getElementById('iosInstallClose');
+  let deferredPrompt = null;
+
+  const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
+
+  if(isStandalone()) return; // already installed/running as an app — nothing to offer
+
+  if(isIOS){
+    installBtn.classList.remove('hidden');
+    installBtn.addEventListener('click', ()=> iosModal.classList.remove('hidden'));
+    iosClose.addEventListener('click', ()=> iosModal.classList.add('hidden'));
+    iosModal.addEventListener('click', (e)=>{ if(e.target===iosModal) iosModal.classList.add('hidden'); });
+  } else {
+    window.addEventListener('beforeinstallprompt', (e)=>{
+      e.preventDefault();
+      deferredPrompt = e;
+      installBtn.classList.remove('hidden');
+    });
+    installBtn.addEventListener('click', async ()=>{
+      if(!deferredPrompt) return;
+      installBtn.disabled = true;
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+      deferredPrompt = null;
+      installBtn.disabled = false;
+      installBtn.classList.add('hidden');
+    });
+  }
+
+  window.addEventListener('appinstalled', ()=>{
+    installBtn.classList.add('hidden');
+    deferredPrompt = null;
+  });
+})();
 
 </script>
 </body>
