@@ -62,12 +62,9 @@ yet.
 | `load_history.js` | One-time loader for historical data (e.g. all of 2025) into `sales_history` |
 | `package.json` | Node dependencies (Express, Multer, DuckDB, SheetJS) |
 | `public/index.html` | Your dashboard — KPIs/charts/pivot/reports now query the server instead of an in-browser array |
-| `upload_daily.py` | Runs on the HO server at 05:00, finds today's dated export and pushes it to Railway (with its own retry-on-failure) |
-| `create_scheduled_task.ps1` | **Preferred** — registers the 05:00 upload task so it survives logouts/reboots and retries on failure |
-| `create_scheduled_task.bat` | Fallback registration (simpler, but only runs while someone's logged into the HO server) |
-| `delete_daily_export.py` | Runs on the HO server at 18:00, deletes the day's CSV(s) now that they're already in Railway |
-| `create_delete_task.ps1` | **Preferred** — same reliability treatment as create_scheduled_task.ps1, for the 18:00 cleanup |
-| `create_delete_task.bat` | Fallback registration for the cleanup task |
+| `upload_daily.py` | Runs on the HO server from 05:00 (retrying hourly until 23:00), uploads the day's export once, safe to re-run any number of times |
+| `delete_daily_export.py` | Runs on the HO server at 23:30, deletes only exports already confirmed uploaded |
+| `SETUP_HO_SERVER.bat` + `setup_ho_server.ps1` | **Double-click once on the HO server** — finds Python, installs packages, registers both tasks, test-runs the upload |
 | `public/manifest.webmanifest` | PWA manifest — what makes the browser offer "Install app" |
 | `public/sw.js` | Service worker (required for installability) — caches the app shell only, never `/api/*` |
 | `public/icons/` | App icons for the install prompt, home screen, and taskbar |
@@ -183,100 +180,38 @@ installer from [python.org/downloads](https://www.python.org/downloads/) and
 run it, ticking **"Add python.exe to PATH"** on the first screen (easy to
 miss).
 
-Afterward, verify with `python --version`. If that says "not recognized" but
-double-clicking a `.py` file still runs it fine, try `py --version` instead
-— the `py` launcher is registered separately from `python` itself and is
-usually more reliable. **This mismatch matters a lot for what follows**: a
-Windows Scheduled Task doesn't behave like double-clicking or typing a
-command yourself (see the note in step 5 below) — the scripts in this repo
-are written assuming `py` is what works, not necessarily `python`.
+Afterward, verify with `py --version` or `python --version`.
 
-1. Install Python if it isn't already there (see "Installing Python on the
-   HO server" below — there's a specific gotcha worth reading first), then:
-   ```
-   pip install requests requests-toolbelt
-   ```
-2. Copy this folder's `upload_daily.py`, `delete_daily_export.py`,
-   `upload_config.example.py`, `create_scheduled_task.ps1`, and
-   `create_delete_task.ps1` onto the HO server (anywhere is fine — e.g.
-   `C:\iTrade\bi-upload\`).
-3. Copy `upload_config.example.py` to `upload_config.py` (same folder) and
-   fill in the two values inside it:
-   ```python
-   SERVER_URL = "https://salem-mall-bi-production.up.railway.app"
-   API_KEY = "the-same-string-you-put-in-Railway's-API_KEY-variable"
-   ```
-   `upload_config.py` is deliberately **not** part of the repo (it's
-   gitignored) — it holds a real secret, and this keeps that secret from
-   ever ending up in git history. `FOLDER`/`FILENAME_PATTERN` inside
-   `upload_daily.py` itself already match `C:\iTrade\SALESALLBRANCHES` and
-   normally don't need touching.
-4. Test it manually:
-   ```
-   py upload_daily.py
-   ```
-   You should see `Upload succeeded: N rows ingested in X.Xs`, and the same
-   line appended to a new `upload_log.txt` next to the script. Refresh your
-   Railway dashboard URL — your data should now load automatically. If
-   today's dated file isn't there yet, it'll say so and fall back to the
-   newest one it can find — don't ignore that warning, it means the iTrade
-   export didn't run today.
-5. **Automate the upload — right-click `create_scheduled_task.ps1` → "Run
-   with PowerShell"** on the HO server (if that's blocked, run
-   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once in PowerShell
-   first). It registers a Windows Task Scheduler job named
-   `SalemMallBIUpload` that runs `upload_daily.py` daily at **05:00** — an
-   hour after iTrade's 04:00 export, so the file is always fully written by
-   the time this runs, and well clear of ~7am when people start checking the
-   dashboard.
+### Setting up the HO server (one time)
 
-   **Why a scheduled run can silently fail even when running it yourself
-   works** — two separate gotchas this script is specifically built to
-   avoid:
-   - Task Scheduler launches the script's "Program" by looking it up via
-     **its own** process's PATH, which is often stale/different from an
-     interactive Command Prompt's — so `python upload_daily.py` working
-     when you type it yourself doesn't guarantee a scheduled task can find
-     `python` too. Fixed by launching via the full path to the **`py`
-     launcher** (`%SystemRoot%\py.exe`), since `C:\Windows` is always on
-     every process's PATH regardless of how Python was installed.
-   - A task registered the ordinary way (`schtasks`, or a Basic Task in the
-     GUI) **only runs while a user is actively logged into the server.** If
-     it reboots overnight — a Windows Update, a power blip — and nobody
-     logs back in before 05:00, that day's run is silently skipped
-     entirely. This is the single most likely explanation for a scheduler
-     that "works most days but not every day." `create_scheduled_task.ps1`
-     registers the task so it runs whether anyone's logged in or not, plus
-     catches up a run the machine was off for instead of skipping it, plus
-     retries automatically (3x, 5 min apart) if the script itself fails —
-     **but this specific combination needs the registration step to run in
-     an elevated PowerShell** (right-click PowerShell → **Run as
-     Administrator**, then run the `.ps1` from there). If you run it
-     without elevation, it still registers successfully with the
-     catch-up/retry improvements, just tells you it fell back to the
-     logged-in-only behavior — re-run it elevated later to remove that
-     requirement.
+1. Copy `upload_daily.py`, `delete_daily_export.py`, `upload_config.py`,
+   `SETUP_HO_SERVER.bat` and `setup_ho_server.ps1` into one folder on the
+   HO server (e.g. `D:\sftp pushing for bi dashboard\`). `upload_config.py`
+   holds `SERVER_URL` and `API_KEY` (copy it from `upload_config.example.py`
+   if you're starting fresh). It is gitignored and never committed.
+2. **Double-click `SETUP_HO_SERVER.bat`** and click Yes on the admin prompt.
+   It:
+   - finds the real `python.exe` and bakes its **full path** into the task
+     (the old task ran bare `python`, which Task Scheduler couldn't find, so
+     it never fired and the upload had to be opened by hand every day)
+   - installs `requests` / `requests-toolbelt` for that exact Python
+   - removes the old tasks and registers `SalemMallBIUpload` (05:00, then
+     hourly until 23:00) and `SalemMallBIDeleteExport` (23:30). Both run
+     **whether or not anyone is logged in**, catch up if the server was off,
+     and run hidden
+   - test-runs the upload through Task Scheduler itself and prints the result
+3. If it ends with a green **SUCCESS**, you're done. Re-run it any time, for
+   example after moving the folder.
 
-   Either way, **verify it actually works, don't just trust that
-   registering it succeeded**:
-   ```powershell
-   Start-ScheduledTask -TaskName "SalemMallBIUpload"
-   ```
-   then check `upload_log.txt` next to the script.
+How the upload stays reliable: each run checks `upload_state.json`. If
+today's file was already uploaded, it exits silently. If the file isn't there
+yet, or iTrade is still writing it, or the network fails (3 in-process
+retries), the next hourly run simply tries again. The cleanup only deletes a
+file recorded as uploaded, or one older than it (each export is cumulative
+YTD), so a failed upload never loses the file.
 
-6. **Automate the cleanup — right-click `create_delete_task.ps1` → "Run
-   with PowerShell"** the same way. It registers a second job,
-   `SalemMallBIDeleteExport`, that runs `delete_daily_export.py` daily at
-   **18:00** — well after the 05:00 upload, so the file is already safely
-   in Railway before it's removed, logging to `delete_log.txt` next to the
-   script. This keeps `C:\iTrade\SALESALLBRANCHES` from filling up with a
-   new ~1GB file every day forever. It also cleans up any older leftover
-   exports it finds, as a safety net if a previous day's cleanup was ever
-   missed.
-
-   *(`create_scheduled_task.bat` / `create_delete_task.bat` still exist as
-   a simpler fallback if running a `.ps1` isn't practical on your server —
-   they get the `py`-launcher fix but not the logout/reboot resilience.)*
+Manual run on the HO server: `py upload_daily.py` (add `--force` to
+re-upload even if today's file was already sent).
 
 ---
 
@@ -285,11 +220,11 @@ are written assuming `py` is what works, not necessarily `python`.
 ```
 04:00  iTrade writes Sales_All_Branches_YYYYMMDD.csv
 05:00  upload_daily.py (HO server) pushes it to Railway; DuckDB ingests it
-       server-side (roughly 30–60s at ~1M rows/1GB — nobody waits on it)
+       server-side (~15s). Re-tries hourly until 23:00 if anything failed
 ~07:00 Anyone who opens the Railway URL sees the dashboard auto-load that
        data in milliseconds — no manual file drop needed
-18:00  delete_daily_export.py (HO server) deletes that day's CSV — it's
-       already safely in Railway by now
+23:30  delete_daily_export.py (HO server) deletes the CSV, but only if it
+       was confirmed uploaded
 ```
 
 Manual drag-and-drop/file-picker upload on the dashboard still works too
@@ -327,25 +262,14 @@ Category/Class/Supplier filters remain single-select.
 
 ## Things worth knowing
 
-- **Troubleshooting a missed day**: check two things — `upload_log.txt`
-  next to the script (what the script itself saw and did), and the task's
-  own history:
+- **Troubleshooting a missed day**: check `upload_log.txt` next to the
+  script first (what the script saw and did), then the task's own history:
   ```powershell
   Get-ScheduledTaskInfo -TaskName "SalemMallBIUpload"
   ```
-  `LastTaskResult` of `0` means it ran and exited successfully;
-  anything else (or a `LastRunTime` that isn't from today) tells you the
-  task itself didn't fire — at that point it's a Task Scheduler/Windows
-  issue (was the server off, still on `create_scheduled_task.bat`'s
-  logged-in-only behavior, etc.), not the script.
-- **Upload retries built in, at two levels**: `upload_daily.py` itself
-  retries a failed upload up to 3 times (20s, then 60s apart) if the
-  problem looks transient (network error, or a 5xx from the server) — but
-  not on a 4xx (wrong API key, bad file), since retrying that just wastes
-  time. Separately, `create_scheduled_task.ps1` sets the *task* to retry up
-  to 3 more times, 5 minutes apart, if the script still exits with an
-  error after its own retries. Between the two, a single transient blip at
-  05:00 sharp is very unlikely to mean the whole day gets missed.
+  `LastTaskResult` of `0` means it ran and exited cleanly. A `LastRunTime`
+  that isn't from today means the task itself didn't fire, so re-run
+  `SETUP_HO_SERVER.bat`.
 - **What changed vs. the first version you got**: that version stored the
   raw file and let the browser parse it — fine at small scale, not viable at
   1M+ rows. This version ingests into DuckDB server-side and the dashboard's

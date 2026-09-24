@@ -1,71 +1,53 @@
 """
 upload_daily.py
 ----------------
-Runs on the HO SERVER (via Windows Task Scheduler) — the same machine the
-iTrade export already writes its daily CSV to. Every time it runs, it finds
-today's export file and pushes it to your Railway-hosted dashboard backend,
-which ingests it into DuckDB.
+Runs on the HO SERVER via Windows Task Scheduler (registered by
+SETUP_HO_SERVER.bat). Finds the day's iTrade export and pushes it to the
+Railway dashboard backend, which ingests it into DuckDB.
 
-Your export writes a NEW file each day with the date in the name, e.g.:
-    C:\\iTrade\\SALESALLBRANCHES\\Sales_All_Branches_20260725.csv
-so this script builds today's expected filename from FOLDER + FILENAME_PATTERN
-rather than pointing at one fixed path. If today's file isn't there yet (the
-export hasn't run, or is still writing), it falls back to the newest matching
-file in the folder and logs a warning so that's visible — it never uploads
-silently-wrong data without saying so.
+iTrade writes a new cumulative (year-to-date) file every day, e.g.:
+    C:\\iTrade\\SALESALLBRANCHES\\Sales_All_Branches_20260925.csv
 
-Every run (success, warning, or failure — including a crash) is appended to
-upload_log.txt next to this script, in addition to printing to the console.
-This matters specifically because Task Scheduler runs show nothing on screen
-at all — the log file is the only way to see what happened on a scheduled run.
+HOW THE SCHEDULE WORKS
+  The task fires at 05:00 and then again every hour until 23:00. This script
+  is safe to run any number of times:
+    - today's file already uploaded      -> logs one line, exits, does nothing
+    - today's file not there yet         -> exits, next hourly run tries again
+    - file still being written by iTrade -> waits for it to finish first
+    - network / Railway hiccup           -> retries 3x in-process, and the
+                                            next hourly run tries again
+  So one missed/failed attempt no longer means a missed day.
 
-CSV is what makes 1M+ row / ~1GB uploads ingest in seconds server-side (via
-DuckDB's native CSV reader). Keep pointing this at the .csv export, not an
-.xlsx, for the daily job.
+What's been uploaded is recorded in upload_state.json next to this script.
+delete_daily_export.py reads that file so it only ever deletes an export
+that has definitely reached the server.
 
-SETUP (one-time, on the HO server):
-  1. Install Python 3 if it isn't already there: https://www.python.org/downloads/
-     (tick "Add Python to PATH" during install)
-  2. Open Command Prompt and run:
-         pip install requests requests-toolbelt
-  3. Copy upload_config.example.py to upload_config.py (same folder) and edit
-     the values inside it — SERVER_URL and API_KEY. upload_config.py is
-     gitignored on purpose: it holds a real secret and must never end up
-     committed to the repo. FOLDER/FILENAME_PATTERN live below and normally
-     don't need changing.
-  4. Test it manually once:
-         python upload_daily.py
-     You should see "Upload succeeded" printed, with the row count and how
-     long the server took to ingest it.
-  5. Schedule it (see create_scheduled_task.bat / README.md) to run a few
-     minutes AFTER the iTrade export job finishes for the day. IMPORTANT:
-     the scheduled task must launch this via the "py" launcher, not bare
-     "python" — see the comment in create_scheduled_task.bat for why a
-     scheduled run can silently fail even when running it yourself works.
+Every run is appended to upload_log.txt next to this script -- a scheduled
+run shows nothing on screen, so that log is where to look.
 
-This script does NOT touch or modify the export file — it only reads and
-uploads a copy of it.
+MANUAL USE
+    py upload_daily.py            normal run (same as the scheduler)
+    py upload_daily.py --force    re-upload the newest file even if already done
+
+This script never modifies the export file -- it only reads it.
 """
 
 import sys
 import os
 import glob
 import gzip
+import json
+import time
 import shutil
 import tempfile
 import traceback
-import time
 from datetime import datetime
 
 # ============ CONFIG ============
-# FOLDER / FILENAME_PATTERN describe where iTrade writes its daily export —
-# these normally don't need to change.
 FOLDER = r"C:\iTrade\SALESALLBRANCHES"
-FILENAME_PATTERN = "Sales_All_Branches_{date}.csv"   # {date} is replaced with today's date as YYYYMMDD
+FILENAME_PATTERN = "Sales_All_Branches_{date}.csv"   # {date} = YYYYMMDD
 
-# SERVER_URL / API_KEY are secrets and live in upload_config.py (gitignored,
-# NOT committed) instead of here — copy upload_config.example.py to
-# upload_config.py and fill in the real values there.
+# SERVER_URL / API_KEY live in upload_config.py (same folder, never committed).
 try:
     from upload_config import SERVER_URL, API_KEY
 except ImportError:
@@ -73,189 +55,225 @@ except ImportError:
     API_KEY = None
 # =================================
 
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "upload_log.txt")
-# A 1GB+ file over the office link can genuinely take minutes.
-UPLOAD_TIMEOUT_SECONDS = 1800
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH = os.path.join(SCRIPT_DIR, "upload_log.txt")
+STATE_PATH = os.path.join(SCRIPT_DIR, "upload_state.json")
+LOCK_PATH = os.path.join(SCRIPT_DIR, "upload.lock")
 
-CONTENT_TYPES = {
-    ".csv": "text/csv",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".xls": "application/vnd.ms-excel",
-}
+UPLOAD_TIMEOUT_SECONDS = 1800        # 1GB+ over the office link can take minutes
+MAX_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = [30, 120]      # before attempt 2, before attempt 3
+STABLE_CHECK_SECONDS = 60            # file size must not change for this long
+STABLE_MAX_WAIT_SECONDS = 45 * 60    # give up waiting (next hourly run retries)
+LOCK_STALE_SECONDS = 3 * 60 * 60     # a lock older than this is from a dead run
+LOG_MAX_BYTES = 2 * 1024 * 1024
 
 
 def log(msg):
-    """Prints AND appends to upload_log.txt — Task Scheduler shows nothing on
-    screen for a scheduled run, so the file is the only way to see what
-    happened without this."""
-    line = f"[{datetime.now()}] {msg}"
-    print(line)
+    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
     try:
+        print(line)
+    except Exception:
+        pass  # no console under Task Scheduler is fine
+    try:
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
+            os.replace(LOG_PATH, LOG_PATH + ".old")
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except OSError:
-        pass  # logging must never be the reason the upload itself fails
+        pass  # logging must never be the reason the upload fails
 
 
-def _extract_date(path):
-    """Parses the {date} portion of a filename as YYYYMMDD. Returns a datetime,
-    or None if it doesn't match that exact 8-digit shape — this keeps
-    non-daily files (e.g. a historical dump like Sales_All_Branches_2025.csv)
-    from ever being mistaken for a dated daily export."""
+def load_state():
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_PATH)
+
+
+def file_signature(path):
+    st = os.stat(path)
+    return {"name": os.path.basename(path), "size": st.st_size, "mtime": int(st.st_mtime)}
+
+
+def extract_date(path):
+    """YYYYMMDD from the filename, or None if it isn't a dated daily export."""
     prefix, suffix = FILENAME_PATTERN.split("{date}")
     name = os.path.basename(path)
     if not (name.startswith(prefix) and name.endswith(suffix)):
         return None
-    date_str = name[len(prefix): len(name) - len(suffix)]
     try:
-        return datetime.strptime(date_str, "%Y%m%d")
+        return datetime.strptime(name[len(prefix): len(name) - len(suffix)], "%Y%m%d")
     except ValueError:
         return None
 
 
-def find_todays_file():
-    """Returns (path, is_fallback). Prefers today's exact filename; if that's
-    not there yet, falls back to the most recent validly-dated file matching
-    the pattern, so a late/early scheduler run still finds something."""
-    today_name = FILENAME_PATTERN.format(date=datetime.now().strftime("%Y%m%d"))
-    today_path = os.path.join(FOLDER, today_name)
+def newest_export():
+    """Today's file if present, otherwise the newest validly-dated one."""
+    today_path = os.path.join(FOLDER, FILENAME_PATTERN.format(date=datetime.now().strftime("%Y%m%d")))
     if os.path.isfile(today_path):
-        return today_path, False
-
-    glob_pattern = os.path.join(FOLDER, FILENAME_PATTERN.format(date="*"))
-    candidates = [(p, _extract_date(p)) for p in glob.glob(glob_pattern)]
+        return today_path
+    candidates = [(p, extract_date(p)) for p in glob.glob(os.path.join(FOLDER, FILENAME_PATTERN.format(date="*")))]
     candidates = [(p, d) for p, d in candidates if d is not None]
     if not candidates:
-        return None, False
-    newest = max(candidates, key=lambda pd: pd[1])[0]
-    return newest, True
+        return None
+    return max(candidates, key=lambda pd: pd[1])[0]
 
 
-def main():
-    log("--- upload_daily.py starting ---")
+def wait_until_stable(path):
+    """Returns True once the file has stopped growing (iTrade finished writing
+    it), False if it's still changing after STABLE_MAX_WAIT_SECONDS."""
+    deadline = time.time() + STABLE_MAX_WAIT_SECONDS
+    last = file_signature(path)
+    announced = False
+    while True:
+        time.sleep(STABLE_CHECK_SECONDS)
+        if not os.path.isfile(path):
+            return False
+        cur = file_signature(path)
+        if cur == last and time.time() - cur["mtime"] >= STABLE_CHECK_SECONDS:
+            return True
+        if not announced:
+            log("  File is still being written by iTrade -- waiting for it to finish...")
+            announced = True
+        if time.time() > deadline:
+            return False
+        last = cur
 
-    if not SERVER_URL or not API_KEY:
-        log("ERROR: SERVER_URL/API_KEY not configured. Copy upload_config.example.py "
-            "to upload_config.py and fill in the real values.")
-        sys.exit(1)
-    upload_endpoint = SERVER_URL.rstrip("/") + "/api/upload"
 
+def acquire_lock():
+    """Stops a manual run and a scheduled run from uploading at the same time."""
     try:
-        import requests
-        from requests_toolbelt import MultipartEncoder
-    except ImportError:
-        log("ERROR: the 'requests' and/or 'requests-toolbelt' package isn't installed.")
-        log("Run:  pip install requests requests-toolbelt")
-        sys.exit(1)
+        if os.path.exists(LOCK_PATH) and time.time() - os.path.getmtime(LOCK_PATH) > LOCK_STALE_SECONDS:
+            os.remove(LOCK_PATH)
+        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
 
-    if not os.path.isdir(FOLDER):
-        log(f"ERROR: folder not found: {FOLDER}")
-        log("Check FOLDER at the top of this script.")
-        sys.exit(1)
 
-    file_path, is_fallback = find_todays_file()
-    if not file_path:
-        log(f"ERROR: no file matching '{FILENAME_PATTERN}' found in {FOLDER}")
-        sys.exit(1)
-    if is_fallback:
-        log(f"WARNING: today's expected file wasn't found — falling back to "
-            f"the newest matching file instead: {os.path.basename(file_path)}")
-        log("  (Check that the iTrade export actually ran today.)")
+def release_lock():
+    try:
+        os.remove(LOCK_PATH)
+    except OSError:
+        pass
 
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext not in CONTENT_TYPES:
-        log(f"ERROR: unsupported file type '{ext}' — use .csv, .xlsx or .xls")
-        sys.exit(1)
 
+def upload(file_path, requests, MultipartEncoder):
+    """Compresses + uploads. Returns the server's JSON on success, else None."""
+    endpoint = SERVER_URL.rstrip("/") + "/api/upload"
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
-    # CSV compresses very well (typically 5-10x) and the server's DuckDB
-    # reader decompresses gzip directly — sending .csv.gz instead of raw CSV
-    # cuts transfer time by the same factor, which matters on slower office
-    # links where an uncompressed 1-2GB file can take long enough to hit an
-    # upstream request timeout before it fully arrives.
-    gz_path = None
-    if ext == ".csv":
-        gz_path = os.path.join(tempfile.gettempdir(), os.path.basename(file_path) + ".gz")
-        log("Compressing before upload...")
-        with open(file_path, "rb") as src, gzip.open(gz_path, "wb") as dst:
-            shutil.copyfileobj(src, dst, length=16 * 1024 * 1024)
-        upload_path = gz_path
-        upload_name = os.path.basename(file_path) + ".gz"
-        content_type = "application/gzip"
-        gz_size_mb = os.path.getsize(gz_path) / (1024 * 1024)
-        log(f"  {size_mb:.1f} MB -> {gz_size_mb:.1f} MB gzipped")
-    else:
-        upload_path = file_path
-        upload_name = os.path.basename(file_path)
-        content_type = CONTENT_TYPES[ext]
-
-    log(f"Uploading {upload_path} -> {upload_endpoint}")
-
-    # A 5am run can hit a genuinely transient problem -- the office link
-    # blipping, Railway mid-redeploy, a momentary DNS hiccup -- that has
-    # nothing to do with the file or the script and would succeed a minute
-    # later. Retrying here (fast, in-process) catches that without relying
-    # on Task Scheduler's own restart-on-failure (which also exists, see
-    # create_scheduled_task.ps1, as a second, slower layer of the same idea).
-    MAX_ATTEMPTS = 3
-    RETRY_DELAY_SECONDS = [20, 60]  # wait before attempt 2, then before attempt 3
+    # CSV gzips ~15x and the server's DuckDB reader decompresses it directly.
+    gz_path = os.path.join(tempfile.gettempdir(), os.path.basename(file_path) + ".gz")
+    log("Compressing...")
+    with open(file_path, "rb") as src, gzip.open(gz_path, "wb", compresslevel=6) as dst:
+        shutil.copyfileobj(src, dst, length=16 * 1024 * 1024)
+    log(f"  {size_mb:.1f} MB -> {os.path.getsize(gz_path) / (1024 * 1024):.1f} MB gzipped")
 
     try:
-        resp = None
-        last_error = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if attempt > 1:
                 delay = RETRY_DELAY_SECONDS[attempt - 2]
                 log(f"Retrying in {delay}s (attempt {attempt}/{MAX_ATTEMPTS})...")
                 time.sleep(delay)
+            log(f"Uploading to {endpoint} ...")
             try:
-                with open(upload_path, "rb") as f:
-                    # Streams the file straight from disk instead of
-                    # buffering the whole multipart body in memory --
-                    # requests' default files= encoding loads the entire
-                    # file into RAM first, which can exhaust memory well
-                    # before the 2GB server-side cap. Re-opened fresh each
-                    # attempt since a failed send leaves the handle at EOF.
-                    encoder = MultipartEncoder(fields={"file": (upload_name, f, content_type)})
+                with open(gz_path, "rb") as f:
+                    # Streams from disk instead of loading the whole body into RAM.
+                    encoder = MultipartEncoder(fields={"file": (os.path.basename(gz_path), f, "application/gzip")})
                     headers = {"X-API-Key": API_KEY, "Content-Type": encoder.content_type}
-                    resp = requests.post(upload_endpoint, data=encoder, headers=headers, timeout=UPLOAD_TIMEOUT_SECONDS)
-                if resp.status_code == 200 or (400 <= resp.status_code < 500):
-                    # Success, or an error retrying won't fix (bad file,
-                    # wrong API key, etc.) -- stop here either way.
-                    break
-                last_error = f"server responded {resp.status_code}: {resp.text}"
-                log(f"WARNING: {last_error}")
+                    resp = requests.post(endpoint, data=encoder, headers=headers, timeout=UPLOAD_TIMEOUT_SECONDS)
             except requests.exceptions.RequestException as e:
-                last_error = str(e)
                 log(f"WARNING: could not reach server: {e}")
-                resp = None
-        if resp is None:
-            log(f"ERROR: could not reach server after {MAX_ATTEMPTS} attempts: {last_error}")
-            sys.exit(1)
+                continue
+            if resp.status_code == 200:
+                return resp.json()
+            log(f"WARNING: server responded {resp.status_code}: {resp.text[:500]}")
+            if 400 <= resp.status_code < 500:
+                return None  # bad key / bad file -- retrying won't help
+        return None
     finally:
-        if gz_path:
+        try:
             os.unlink(gz_path)
+        except OSError:
+            pass
 
-    if resp.status_code == 200:
-        result = resp.json()
-        log(f"Upload succeeded: {result.get('rows', '?'):,} rows ingested in "
-            f"{result.get('ingestMs', 0) / 1000:.1f}s (server-side)")
-        if result.get("skipped"):
-            log(f"  Note: {result['skipped']:,} row(s) skipped — no readable date in 'trandate'.")
-    else:
-        log(f"ERROR: server responded {resp.status_code}: {resp.text}")
-        sys.exit(1)
+
+def main():
+    force = "--force" in sys.argv
+
+    if not SERVER_URL or not API_KEY:
+        log("ERROR: SERVER_URL/API_KEY not configured -- create upload_config.py next to this script.")
+        return 1
+    try:
+        import requests
+        from requests_toolbelt import MultipartEncoder
+    except ImportError:
+        log(f"ERROR: missing packages. Run:  \"{sys.executable}\" -m pip install requests requests-toolbelt")
+        return 1
+    if not os.path.isdir(FOLDER):
+        log(f"ERROR: folder not found: {FOLDER}")
+        return 1
+
+    file_path = newest_export()
+    if not file_path:
+        log(f"No export matching {FILENAME_PATTERN} in {FOLDER} yet -- will try again next run.")
+        return 0
+
+    state = load_state()
+    sig = file_signature(file_path)
+    if not force and state.get("last_uploaded") == sig:
+        # Already done today; stay quiet so the log isn't flooded by hourly runs.
+        return 0
+
+    today_name = FILENAME_PATTERN.format(date=datetime.now().strftime("%Y%m%d"))
+    log(f"--- upload starting: {sig['name']} ---")
+    if sig["name"] != today_name:
+        log(f"  Note: today's file ({today_name}) isn't there yet -- uploading the newest one available.")
+
+    if not wait_until_stable(file_path):
+        log("  File still changing (or vanished) -- skipping; next hourly run will retry.")
+        return 1
+    sig = file_signature(file_path)  # final size after writing finished
+
+    result = upload(file_path, requests, MultipartEncoder)
+    if result is None:
+        log("ERROR: upload failed -- the next hourly run will try again automatically.")
+        return 1
+
+    rows = result.get("rows")
+    rows_txt = f"{rows:,}" if isinstance(rows, int) else "?"
+    log(f"Upload succeeded: {rows_txt} rows ingested in {result.get('ingestMs', 0) / 1000:.1f}s (server-side)")
+    if result.get("skipped"):
+        log(f"  Note: {result['skipped']:,} row(s) skipped -- no readable date in 'trandate'.")
+
+    state["last_uploaded"] = sig
+    state["last_uploaded_at"] = datetime.now().isoformat(timespec="seconds")
+    state["last_rows"] = rows
+    save_state(state)
+    return 0
 
 
 if __name__ == "__main__":
+    if not acquire_lock():
+        log("Another upload is already running -- exiting.")
+        sys.exit(0)
     try:
-        main()
-    except SystemExit:
-        raise
+        code = main()
     except Exception:
-        # Catches anything not already handled above (e.g. a permissions
-        # error, disk full while compressing) so a scheduled run that crashes
-        # still leaves a trace instead of vanishing without a sign of why.
         log("FATAL: unhandled exception:\n" + traceback.format_exc())
-        sys.exit(1)
+        code = 1
+    finally:
+        release_lock()
+    sys.exit(code)

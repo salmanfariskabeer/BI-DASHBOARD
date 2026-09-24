@@ -1,44 +1,44 @@
 """
 delete_daily_export.py
 -----------------------
-Runs on the HO SERVER at 18:00 (via create_delete_task.bat), well after
-upload_daily.py has already pushed the day's file to Railway at 05:00.
-By the time this runs, the CSV has done its job and is safe to remove — this
-keeps C:\\iTrade\\SALESALLBRANCHES from filling up with a new ~1GB dated file
-every day forever.
+Runs on the HO SERVER at 23:30 (registered by SETUP_HO_SERVER.bat) so that
+C:\\iTrade\\SALESALLBRANCHES doesn't fill up with a new ~1.8GB file every day.
 
-It deletes every file matching FILENAME_PATTERN whose date is today or
-earlier (never a future date, which shouldn't exist anyway) — not just
-today's file — so if a previous day's cleanup ever failed to run, this
-self-heals instead of leaving old exports piling up.
+SAFETY: it only deletes exports that are definitely no longer needed:
+  - the exact file upload_daily.py recorded as successfully uploaded
+    (same name, size and timestamp, from upload_state.json), and
+  - any dated export OLDER than that one (each export is cumulative
+    year-to-date, so an older file is fully covered by the newer upload).
+If today's upload failed, today's file is KEPT, so tomorrow's run (or a
+manual `py upload_daily.py`) still has it.
 
-Every run is appended to delete_log.txt next to this script, in addition to
-printing to the console — Task Scheduler shows nothing on screen for a
-scheduled run, so the log file is the only way to see what happened.
-
-FOLDER / FILENAME_PATTERN here must match the same values in
-upload_daily.py — if you change the export's location or naming, update
-both scripts.
+FOLDER / FILENAME_PATTERN must match upload_daily.py.
+Every run is appended to delete_log.txt next to this script.
 """
 
 import os
 import sys
 import glob
+import json
 import traceback
 from datetime import datetime
 
-# ============ CONFIG — keep in sync with upload_daily.py ============
+# ============ CONFIG -- keep in sync with upload_daily.py ============
 FOLDER = r"C:\iTrade\SALESALLBRANCHES"
 FILENAME_PATTERN = "Sales_All_Branches_{date}.csv"   # {date} is YYYYMMDD
 # =======================================================================
 
-DATE_FORMAT = "%Y%m%d"
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delete_log.txt")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH = os.path.join(SCRIPT_DIR, "delete_log.txt")
+STATE_PATH = os.path.join(SCRIPT_DIR, "upload_state.json")
 
 
 def log(msg):
-    line = f"[{datetime.now()}] {msg}"
-    print(line)
+    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
+    try:
+        print(line)
+    except Exception:
+        pass
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -46,58 +46,60 @@ def log(msg):
         pass
 
 
-def extract_date(path, pattern):
-    """Pulls the {date} portion out of a filename matched against pattern.
-    Returns a datetime, or None if it doesn't parse (left alone, just in case
-    it's not actually one of ours)."""
-    prefix, suffix = pattern.split("{date}")
+def extract_date(path):
+    prefix, suffix = FILENAME_PATTERN.split("{date}")
     name = os.path.basename(path)
     if not (name.startswith(prefix) and name.endswith(suffix)):
         return None
-    date_str = name[len(prefix): len(name) - len(suffix)]
     try:
-        return datetime.strptime(date_str, DATE_FORMAT)
+        return datetime.strptime(name[len(prefix): len(name) - len(suffix)], "%Y%m%d")
     except ValueError:
         return None
 
 
 def main():
     log("--- delete_daily_export.py starting ---")
-
     if not os.path.isdir(FOLDER):
         log(f"ERROR: folder not found: {FOLDER}")
-        sys.exit(1)
+        return 1
 
-    glob_pattern = os.path.join(FOLDER, FILENAME_PATTERN.format(date="*"))
-    candidates = glob.glob(glob_pattern)
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            uploaded = json.load(f).get("last_uploaded")
+    except (OSError, ValueError):
+        uploaded = None
+    if not uploaded:
+        log("Nothing has been recorded as uploaded yet -- deleting nothing.")
+        return 0
 
-    deleted, skipped = 0, 0
-    for path in candidates:
-        file_date = extract_date(path, FILENAME_PATTERN)
-        if file_date is None:
-            log(f"SKIP (couldn't parse date): {os.path.basename(path)}")
-            skipped += 1
+    uploaded_date = extract_date(uploaded["name"])
+    deleted = kept = 0
+    for path in glob.glob(os.path.join(FOLDER, FILENAME_PATTERN.format(date="*"))):
+        name = os.path.basename(path)
+        d = extract_date(path)
+        if d is None or uploaded_date is None:
             continue
-        if file_date > today:
-            log(f"SKIP (future-dated, unexpected): {os.path.basename(path)}")
-            skipped += 1
-            continue
-        try:
-            os.remove(path)
-            log(f"Deleted {os.path.basename(path)}")
-            deleted += 1
-        except OSError as e:
-            log(f"ERROR deleting {os.path.basename(path)}: {e}")
+        st = os.stat(path)
+        is_uploaded_file = (name == uploaded["name"] and st.st_size == uploaded["size"]
+                            and int(st.st_mtime) == uploaded["mtime"])
+        if d < uploaded_date or is_uploaded_file:
+            try:
+                os.remove(path)
+                log(f"Deleted {name}")
+                deleted += 1
+            except OSError as e:
+                log(f"ERROR deleting {name}: {e}")
+        else:
+            log(f"KEPT {name} (not uploaded yet)")
+            kept += 1
 
-    log(f"Done: {deleted} deleted, {skipped} skipped, {len(candidates)} total matched.")
+    log(f"Done: {deleted} deleted, {kept} kept.")
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
-    except SystemExit:
-        raise
+        sys.exit(main())
     except Exception:
         log("FATAL: unhandled exception:\n" + traceback.format_exc())
         sys.exit(1)
