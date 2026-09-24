@@ -6,12 +6,17 @@
 // flaky connection doesn't leave the app fully blank, but a fresh deploy is
 // still what loads whenever the network is actually up.
 
-const CACHE_NAME = 'salem-mall-bi-shell-v1';
+const CACHE_NAME = 'salem-mall-bi-shell-v2';
 const SHELL_URLS = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_URLS)).then(() => self.skipWaiting())
+    // Cache each file on its own and ignore failures: addAll() rejects if ANY
+    // file fails (e.g. '/' before the password is entered), which would fail
+    // the whole worker install and make the site non-installable.
+    caches.open(CACHE_NAME)
+      .then((cache) => Promise.all(SHELL_URLS.map((u) => cache.add(u).catch(() => {}))))
+      .then(() => self.skipWaiting())
   );
 });
 
@@ -36,6 +41,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(req)
       .then((res) => {
+        if (!res.ok) return res; // never cache a 401 / error page
         const copy = res.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
         return res;

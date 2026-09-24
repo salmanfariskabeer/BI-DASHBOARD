@@ -955,6 +955,20 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
   </div>
 </div>
 
+<div class="modal-overlay hidden" id="desktopInstallModal">
+  <div class="modal-box" style="width:380px">
+    <h3>Install Salem Mall BI</h3>
+    <ol class="install-steps">
+      <li><span class="n">1</span><span><b>Edge:</b> click the <b>&middot;&middot;&middot;</b> menu (top-right) &rarr; <b>Apps</b> &rarr; <b>Install this site as an app</b></span></li>
+      <li><span class="n">2</span><span><b>Chrome:</b> click the <b>install icon</b> at the right end of the address bar, or <b>&#8942;</b> menu &rarr; <b>Cast, save and share</b> &rarr; <b>Install page as app</b></span></li>
+      <li><span class="n">3</span><span>Already installed? Open it from the Start menu / desktop icon <b>Salem Mall BI</b>.</span></li>
+    </ol>
+    <div class="modal-actions">
+      <button class="layout-btn" id="desktopInstallClose">Got it</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay hidden" id="columnPickerModal">
   <div class="modal-box">
     <h3 id="columnPickerTitle">Choose columns to compare</h3>
@@ -3240,19 +3254,25 @@ if('serviceWorker' in navigator){
     iosClose.addEventListener('click', ()=> iosModal.classList.add('hidden'));
     iosModal.addEventListener('click', (e)=>{ if(e.target===iosModal) iosModal.classList.add('hidden'); });
   } else {
+    // Always visible: if the browser hasn't handed us its install prompt
+    // (not ready yet, or already installed) the click shows manual steps
+    // instead of silently doing nothing.
+    const deskModal = document.getElementById('desktopInstallModal');
+    installBtn.classList.remove('hidden');
+    document.getElementById('desktopInstallClose').addEventListener('click', ()=> deskModal.classList.add('hidden'));
+    deskModal.addEventListener('click', (e)=>{ if(e.target===deskModal) deskModal.classList.add('hidden'); });
     window.addEventListener('beforeinstallprompt', (e)=>{
       e.preventDefault();
       deferredPrompt = e;
-      installBtn.classList.remove('hidden');
     });
     installBtn.addEventListener('click', async ()=>{
-      if(!deferredPrompt) return;
+      if(!deferredPrompt){ deskModal.classList.remove('hidden'); return; }
       installBtn.disabled = true;
       deferredPrompt.prompt();
-      await deferredPrompt.userChoice;
+      const choice = await deferredPrompt.userChoice;
       deferredPrompt = null;
       installBtn.disabled = false;
-      installBtn.classList.add('hidden');
+      if(choice && choice.outcome === 'accepted') installBtn.classList.add('hidden');
     });
   }
 

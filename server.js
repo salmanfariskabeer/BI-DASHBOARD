@@ -232,6 +232,15 @@ app.post('/api/upload', requireKey, upload.single('file'), (req, res) => handleU
 // path instead of needing direct volume/DuckDB-file access.
 app.post('/api/upload-history', requireKey, upload.single('file'), (req, res) => handleUpload(req, res, 'sales_history'));
 
+// PWA files must load WITHOUT the password: browsers fetch the manifest and
+// icons with no credentials, so behind the gate they got a 401 and the
+// browser never considered the site installable (no Install App button).
+// None of these contain data.
+const PUBLIC_DIR = path.join(__dirname, 'public');
+app.get('/manifest.webmanifest', (req, res) => res.type('application/manifest+json').sendFile(path.join(PUBLIC_DIR, 'manifest.webmanifest')));
+app.get('/sw.js', (req, res) => { res.set('Cache-Control', 'no-cache'); res.sendFile(path.join(PUBLIC_DIR, 'sw.js')); });
+app.use('/icons', express.static(path.join(PUBLIC_DIR, 'icons')));
+
 // --- Password gate — everything below this line requires it. ---
 // A native browser Basic Auth prompt: simplest thing that actually blocks
 // both the page and the API (a client-side-only lock could be bypassed by
