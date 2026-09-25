@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Madina BI Dashboard — Sign in</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#14213D">
+<link rel="icon" href="/icons/icon-192.png">
+<style>
+  :root{ --ink:#14213D; --ink-2:#1F2E52; --brass:#A9812F; --paper:#F5F6F3; --line:#DCDDD6; --text:#1B1F2A; --dim:#6B7080; --green:#1F5C4D; --brick:#8F332B; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; min-height:100vh; min-height:100dvh; background:var(--paper); color:var(--text);
+    font-family:"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    display:flex; flex-direction:column; }
+  header{ background:var(--ink); color:#fff; padding:22px clamp(16px,2vw,40px) 18px; border-bottom:3px solid var(--brass); }
+  header h1{ margin:0; font-family:Georgia, "Times New Roman", serif; font-size:26px; }
+  header p{ margin:4px 0 0; font-size:12px; letter-spacing:0.5px; text-transform:uppercase; opacity:0.85; }
+  main{ flex:1; display:flex; align-items:center; justify-content:center; padding:32px 16px; }
+  .card{ width:100%; max-width:420px; background:#fff; border:1px solid var(--line); border-top:4px solid var(--brass); padding:28px 26px; }
+  .card h2{ margin:0 0 6px; font-family:Georgia, serif; font-size:20px; color:var(--ink); }
+  .status{ display:flex; gap:10px; align-items:flex-start; padding:12px 14px; background:#F8F7F1; border:1px solid var(--line);
+    font-size:13px; line-height:1.5; margin:16px 0 20px; }
+  .status.ok{ border-color:var(--green); color:var(--green); }
+  .status.warn{ border-color:#C9A15A; }
+  .spinner{ width:16px; height:16px; flex:none; margin-top:2px; border:2px solid var(--line); border-top-color:var(--brass); border-radius:50%; animation:spin 0.8s linear infinite; }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  label{ display:block; font-size:11px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase; color:var(--dim); margin-bottom:6px; }
+  input{ width:100%; padding:11px 12px; font-size:16px; border:1px solid var(--line); border-radius:2px; font-family:inherit; }
+  input:focus{ outline:2px solid var(--brass); outline-offset:0; border-color:var(--brass); }
+  button{ font-family:inherit; cursor:pointer; }
+  .primary{ width:100%; margin-top:14px; padding:12px; font-size:14px; font-weight:600; color:#fff; background:var(--ink); border:0; border-radius:2px; }
+  .primary:hover{ background:var(--ink-2); }
+  .primary:disabled{ opacity:0.6; cursor:default; }
+  .link{ background:none; border:0; color:var(--brass); padding:0; font-size:12.5px; text-decoration:underline; }
+  .err{ color:var(--brick); font-size:12.5px; min-height:18px; margin-top:8px; }
+  .foot{ font-size:11.5px; color:var(--dim); margin-top:18px; line-height:1.5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>BI Analytics Report</h1>
+  <p>Madina BI Dashboard</p>
+</header>
+<main>
+  <div class="card">
+    <h2>Sign in</h2>
+    <div class="status" id="status"><div class="spinner"></div><div id="statusText">Checking your location…</div></div>
+    <form id="pwForm" autocomplete="on">
+      <label for="pw">Password</label>
+      <input type="password" id="pw" name="password" autocomplete="current-password" inputmode="numeric" placeholder="Enter password">
+      <button class="primary" type="submit" id="pwBtn">Sign in</button>
+      <div class="err" id="err"></div>
+    </form>
+    <p class="foot">At the office (within 1 km of Al Salem Mall, Jebel Ali) you're let in automatically — allow location when the browser asks.
+      <button class="link" id="retryLoc" type="button" hidden>Check my location again</button></p>
+  </div>
+</main>
+<script>
+  const statusEl = document.getElementById('status');
+  const statusText = document.getElementById('statusText');
+  const retry = document.getElementById('retryLoc');
+  function setStatus(html, cls, spinning){
+    statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    statusEl.innerHTML = (spinning ? '<div class="spinner"></div>' : '') + '<div>' + html + '</div>';
+  }
+  function enter(){ location.replace('/'); }
+  const km = (m)=> m >= 1000 ? (m/1000).toFixed(1) + ' km' : m + ' m';
+
+  function checkLocation(){
+    retry.hidden = true;
+    if(!('geolocation' in navigator)){
+      setStatus('This browser can\'t share its location — please enter the password.', 'warn');
+      return;
+    }
+    setStatus('Checking your location…', '', true);
+    navigator.geolocation.getCurrentPosition(async (pos)=>{
+      try{
+        const res = await fetch('/api/auth/location', { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }) });
+        const j = await res.json().catch(()=>({}));
+        if(res.ok && j.ok){ setStatus('✓ You\'re at the office — opening the dashboard…', 'ok'); enter(); return; }
+        if(j.reason === 'far') setStatus('You\'re about <b>' + km(j.distance) + '</b> from the office — enter the password to continue.', 'warn');
+        else if(j.reason === 'inaccurate') setStatus('Your location is too approximate (±' + km(j.accuracy) + ') to confirm you\'re at the office — enter the password, or try again with Wi-Fi/GPS on.', 'warn');
+        else setStatus('Couldn\'t confirm your location — enter the password.', 'warn');
+      }catch(e){
+        setStatus('Couldn\'t reach the server — check your connection and try again.', 'warn');
+      }
+      retry.hidden = false;
+    }, (err)=>{
+      setStatus(err.code === 1
+        ? 'Location access is blocked for this site — enter the password, or allow location (lock icon in the address bar) and try again.'
+        : 'Your location isn\'t available right now — enter the password.', 'warn');
+      retry.hidden = false;
+    }, { enableHighAccuracy:true, timeout:15000, maximumAge:60000 });
+  }
+  retry.addEventListener('click', checkLocation);
+
+  document.getElementById('pwForm').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const btn = document.getElementById('pwBtn'), errEl = document.getElementById('err');
+    const pw = document.getElementById('pw').value;
+    if(!pw){ errEl.textContent = 'Enter the password.'; return; }
+    btn.disabled = true; errEl.textContent = '';
+    try{
+      const res = await fetch('/api/auth/password', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ password: pw }) });
+      const j = await res.json().catch(()=>({}));
+      if(res.ok && j.ok){ enter(); return; }
+      errEl.textContent = j.error || 'Wrong password.';
+    }catch(e){
+      errEl.textContent = 'Couldn\'t reach the server — try again.';
+    }
+    btn.disabled = false;
+  });
+
+  checkLocation();
+</script>
+</body>
+</html>

@@ -126,10 +126,9 @@ The code is already on GitHub at
 3. In your Railway project → **Variables**, add:
    - `API_KEY` = a long random string you make up, e.g. `openssl rand -hex 24`
      (this is the password the HO server uses to push data — keep it secret)
-   - `DASHBOARD_PASSWORD` = the password anyone opening the dashboard URL
-     needs to type in. Defaults to `13661366` if you don't set this — set it
-     explicitly if you want a different one, since the default is now public
-     (it's in this README).
+   - `DASHBOARD_PASSWORD` = the password for signing in away from the office.
+     **Only ever set it here, never in code or this README: the repo is
+     public.** If it's unset, password sign-in is disabled.
 4. Under **Settings → Networking**, generate a public domain. You'll get a
    URL like `https://salem-mall-bi-production.up.railway.app` — **this is
    the URL you share with your team**, alongside the password.
@@ -139,8 +138,8 @@ The code is already on GitHub at
    `sales_current`) lives on this volume, and without it a redeploy wipes
    everything, including the 2025 history, until it's reloaded.
 
-Test it: visit the URL. It'll prompt for the password (browser's native
-login box) — enter `DASHBOARD_PASSWORD`. After that you should see the empty
+Test it: visit the URL. The sign-in page checks your location, or you can
+enter `DASHBOARD_PASSWORD`. After that you should see the empty
 state (it checks `/api/status`, finds nothing yet) — expected until history
 is loaded (below) and Part 2 starts pushing daily data.
 
@@ -295,9 +294,13 @@ Category/Class/Supplier filters remain single-select.
   want day-by-day historical retention *within* 2026 too (e.g. "what did
   today's file say last Tuesday"), that's a bigger step — the daily job
   would need to accumulate instead of replace `sales_current`.
-- **Security**: the dashboard and all read APIs require the
-  `DASHBOARD_PASSWORD` (HTTP Basic Auth — browsers show their native login
-  prompt). `/api/upload` is separately protected by its own `API_KEY` header
+- **Security / sign-in**: the dashboard and all read APIs need a signed
+  session cookie, from either (a) the browser's location being within 1 km of
+  Al Salem Mall, Jebel Ali (`OFFICE` / `ACCESS_RADIUS_M` in `server.js`,
+  12-hour session), or (b) `DASHBOARD_PASSWORD` (30-day session). The location
+  is reported by the browser, so it keeps casual outsiders out but can be
+  faked by someone determined; the password is the real lock. A Basic Auth
+  header with the password also works, for scripts. `/api/upload` is separately protected by its own `API_KEY` header
   and is deliberately *not* behind the password gate, since `upload_daily.py`
   on the HO server is a script, not someone typing a password. This is a
   password lock, not full user accounts — anyone with the one password sees

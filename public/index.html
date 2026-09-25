@@ -44,7 +44,7 @@ body{min-height:100vh;}
 .app-header{
   background:var(--ink);
   color:#fff;
-  padding:22px 28px 18px;
+  padding:22px clamp(16px, 2vw, 40px) 18px;
   border-bottom:3px solid var(--brass);
 }
 .app-header .title-row{
@@ -84,7 +84,7 @@ body{min-height:100vh;}
 /* ---------- Load bar ---------- */
 .loadbar{
   background:var(--ink-2);
-  padding:10px 28px;
+  padding:10px clamp(16px, 2vw, 40px);
   display:flex; align-items:center; gap:14px; flex-wrap:wrap;
   border-bottom:1px solid rgba(255,255,255,0.08);
 }
@@ -95,7 +95,7 @@ body{min-height:100vh;}
 .loadbar .status.err{color:#E8A79D;}
 
 /* ---------- Main layout ---------- */
-.main{padding:20px 28px 60px; max-width:1440px; margin:0 auto;}
+.main{padding:20px clamp(16px, 2vw, 40px) 60px; max-width:none; margin:0 auto; box-sizing:border-box; width:100%;}
 .hidden{display:none !important;}
 
 .empty-state{
@@ -698,6 +698,7 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
     Install App
   </button>
   <span class="status" id="loadStatus">Checking server…</span>
+  <button class="reset-btn" id="logoutBtn" style="margin-left:auto;color:#fff;border-color:rgba(255,255,255,0.35)" title="Sign out of the dashboard on this device">Log out</button>
 </div>
 
 <div class="main">
@@ -1143,6 +1144,17 @@ const API = {
   }
 };
 
+// Session expired / signed out elsewhere: any API call answering 401 sends
+// the page back through the sign-in screen (location check or password).
+(function(){
+  const nativeFetch = window.fetch.bind(window);
+  let redirecting = false;
+  window.fetch = (input, init)=> nativeFetch(input, init).then(res=>{
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    if(res.status === 401 && url.includes('/api/') && !redirecting){ redirecting = true; location.reload(); }
+    return res;
+  });
+})();
 // The build id the page was loaded with. If the server reports a different
 // one, a new version was deployed while this page/app stayed open: reload
 // right away if the user isn't looking, otherwise offer a one-click reload.
@@ -3352,6 +3364,10 @@ async function updateAll(){
    INIT / EVENT WIRING
    ============================================================ */
 document.addEventListener('DOMContentLoaded', async ()=>{
+  document.getElementById('logoutBtn').addEventListener('click', async ()=>{
+    await fetch('/api/auth/logout', { method:'POST' }).catch(()=>{});
+    location.reload();
+  });
   document.getElementById('refreshFromServerBtn').addEventListener('click', async ()=>{
     setStatus('Checking server…', '');
     try{

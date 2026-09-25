@@ -19,6 +19,7 @@ const multer = require('multer');
 const duckdb = require('duckdb');
 const XLSX = require('xlsx');
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const { ingestCsvInto, TABLE_SCHEMA_SQL } = require('./ingest');
 
@@ -27,7 +28,10 @@ const PORT = process.env.PORT || 3000;
 // old copy (e.g. an installed app left open) and reloads itself.
 const BUILD_ID = process.env.RAILWAY_DEPLOYMENT_ID || String(Date.now());
 const API_KEY = process.env.API_KEY || '';
-const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '13661366';
+// Set in Railway's variables, never in code: this repo is public.
+// Unset = password sign-in disabled (only the office-location route works).
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
+if (!DASHBOARD_PASSWORD) console.warn('DASHBOARD_PASSWORD is not set: password sign-in is disabled.');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'warehouse.duckdb');
 const TMP_DIR = path.join(DATA_DIR, 'incoming');
@@ -248,22 +252,117 @@ app.get('/manifest.webmanifest', (req, res) => res.type('application/manifest+js
 app.get('/sw.js', (req, res) => { res.set('Cache-Control', 'no-cache'); res.sendFile(path.join(PUBLIC_DIR, 'sw.js')); });
 app.use('/icons', express.static(path.join(PUBLIC_DIR, 'icons')));
 
-// --- Password gate — everything below this line requires it. ---
-// A native browser Basic Auth prompt: simplest thing that actually blocks
-// both the page and the API (a client-side-only lock could be bypassed by
-// hitting /api/aggregate directly), with no separate login page to build.
-function requirePassword(req, res, next) {
-  const auth = req.headers.authorization || '';
-  const [scheme, encoded] = auth.split(' ');
-  if (scheme === 'Basic' && encoded) {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-    const pass = decoded.slice(decoded.indexOf(':') + 1);
-    if (pass === DASHBOARD_PASSWORD) return next();
-  }
-  res.set('WWW-Authenticate', 'Basic realm="Madina BI Dashboard"');
-  res.status(401).send('Password required.');
+// --- Access gate — everything below this line requires it. ---
+// Two ways in, both ending in a signed session cookie:
+//   1. Location: the sign-in page asks the browser for its position; if it
+//      is within ACCESS_RADIUS_M of the office (Al Salem Mall, Jebel Ali),
+//      a LOCATION_SESSION_HOURS session is issued with no password.
+//   2. Password (DASHBOARD_PASSWORD) from anywhere: PASSWORD_SESSION_DAYS.
+// A Basic Auth header with the password is still accepted (scripts/curl),
+// but the browser is never sent a Basic challenge any more — it gets the
+// sign-in page instead, since a native prompt would block the location check.
+// NOTE: the position is reported by the browser, so this keeps casual
+// outsiders out but is not tamper-proof; the password is the real lock.
+const OFFICE = { lat: 24.9829357, lng: 55.1373008 }; // Al Salem Mall, Etisalat Tower, Jebel Ali Industrial 1
+const ACCESS_RADIUS_M = Number(process.env.ACCESS_RADIUS_M) || 1000;
+const MAX_LOCATION_ACCURACY_M = 1500; // vaguer fixes (e.g. IP-only) can't prove "within 1 km"
+const LOCATION_SESSION_HOURS = 12;
+const PASSWORD_SESSION_DAYS = 30;
+const SESSION_COOKIE = 'madina_bi_session';
+const SESSION_SECRET = process.env.SESSION_SECRET
+  || crypto.createHash('sha256').update('madina-bi|' + API_KEY + '|' + DASHBOARD_PASSWORD).digest('hex');
+
+app.set('trust proxy', 1);
+
+function signSession(method, ms) {
+  const body = Buffer.from(JSON.stringify({ m: method, exp: Date.now() + ms })).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
+  return body + '.' + sig;
 }
-app.use(requirePassword);
+function readSession(req) {
+  const raw = (req.headers.cookie || '').split(';').map((c) => c.trim()).find((c) => c.startsWith(SESSION_COOKIE + '='));
+  if (!raw) return null;
+  const [body, sig] = raw.slice(SESSION_COOKIE.length + 1).split('.');
+  if (!body || !sig) return null;
+  const expect = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
+  if (sig.length !== expect.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect))) return null;
+  try {
+    const s = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    return s.exp > Date.now() ? s : null;
+  } catch (e) { return null; }
+}
+function setSession(req, res, method, ms) {
+  res.cookie(SESSION_COOKIE, signSession(method, ms), {
+    httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: ms, path: '/',
+  });
+}
+function distanceMeters(a, b) {
+  const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// Brute-force brake on the password: 10 wrong tries per IP per 15 minutes.
+const failedLogins = new Map();
+function tooManyFailures(ip) {
+  const now = Date.now(), f = failedLogins.get(ip);
+  if (!f || now - f.first > 15 * 60 * 1000) return false;
+  return f.count >= 10;
+}
+function noteFailure(ip) {
+  const now = Date.now(), f = failedLogins.get(ip);
+  if (!f || now - f.first > 15 * 60 * 1000) failedLogins.set(ip, { first: now, count: 1 });
+  else f.count++;
+}
+
+app.post('/api/auth/location', (req, res) => {
+  const lat = Number(req.body && req.body.lat), lng = Number(req.body && req.body.lng);
+  const accuracy = Number(req.body && req.body.accuracy) || 0;
+  if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ ok: false, error: 'Invalid location' });
+  }
+  const distance = Math.round(distanceMeters(OFFICE, { lat, lng }));
+  if (accuracy > MAX_LOCATION_ACCURACY_M) {
+    return res.status(403).json({ ok: false, distance, accuracy: Math.round(accuracy), reason: 'inaccurate' });
+  }
+  if (distance > ACCESS_RADIUS_M) {
+    return res.status(403).json({ ok: false, distance, accuracy: Math.round(accuracy), reason: 'far' });
+  }
+  setSession(req, res, 'location', LOCATION_SESSION_HOURS * 3600 * 1000);
+  res.json({ ok: true, distance });
+});
+
+app.post('/api/auth/password', (req, res) => {
+  if (tooManyFailures(req.ip)) return res.status(429).json({ ok: false, error: 'Too many wrong attempts — try again in 15 minutes.' });
+  if (!DASHBOARD_PASSWORD || String((req.body && req.body.password) || '') !== DASHBOARD_PASSWORD) {
+    noteFailure(req.ip);
+    return res.status(401).json({ ok: false, error: 'Wrong password.' });
+  }
+  failedLogins.delete(req.ip);
+  setSession(req, res, 'password', PASSWORD_SESSION_DAYS * 86400 * 1000);
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie(SESSION_COOKIE, { path: '/' });
+  res.json({ ok: true });
+});
+
+function hasValidBasicAuth(req) {
+  const [scheme, encoded] = (req.headers.authorization || '').split(' ');
+  if (scheme !== 'Basic' || !encoded) return false;
+  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  return !!DASHBOARD_PASSWORD && decoded.slice(decoded.indexOf(':') + 1) === DASHBOARD_PASSWORD;
+}
+function requireAccess(req, res, next) {
+  if (readSession(req) || hasValidBasicAuth(req)) return next();
+  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Sign-in required' });
+  // Any page request: the sign-in page, as a 401 so the service worker
+  // never caches it in place of the dashboard.
+  res.status(401).set('Cache-Control', 'no-store').sendFile(path.join(PUBLIC_DIR, 'login.html'));
+}
+app.use(requireAccess);
 
 app.get('/api/status', async (req, res) => {
   try {
