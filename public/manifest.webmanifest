@@ -1,6 +1,6 @@
 {
-  "name": "Salem Mall BI Dashboard",
-  "short_name": "Salem Mall BI",
+  "name": "Madina BI Dashboard",
+  "short_name": "Madina BI",
   "description": "Sales, margin and pivot analytics across all branches.",
   "start_url": "/",
   "scope": "/",

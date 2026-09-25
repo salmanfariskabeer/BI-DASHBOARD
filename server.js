@@ -1,4 +1,4 @@
-// server.js — Salem Mall BI backend.
+// server.js — Madina BI backend.
 //
 // Ingests the daily sales export (CSV preferred, XLSX also accepted) into a
 // DuckDB file on disk, then answers every dashboard request with a small
@@ -257,7 +257,7 @@ function requirePassword(req, res, next) {
     const pass = decoded.slice(decoded.indexOf(':') + 1);
     if (pass === DASHBOARD_PASSWORD) return next();
   }
-  res.set('WWW-Authenticate', 'Basic realm="Salem Mall BI Dashboard"');
+  res.set('WWW-Authenticate', 'Basic realm="Madina BI Dashboard"');
   res.status(401).send('Password required.');
 }
 app.use(requirePassword);
@@ -548,7 +548,7 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 
 ensureSchema()
   .then(() => {
-    app.listen(PORT, () => console.log(`Salem Mall BI backend listening on port ${PORT}`));
+    app.listen(PORT, () => console.log(`Madina BI backend listening on port ${PORT}`));
   })
   .catch((err) => {
     console.error('Failed to initialize database schema:', err);

@@ -6,7 +6,7 @@
 // flaky connection doesn't leave the app fully blank, but a fresh deploy is
 // still what loads whenever the network is actually up.
 
-const CACHE_NAME = 'salem-mall-bi-shell-v2';
+const CACHE_NAME = 'madina-bi-shell-v3';
 const SHELL_URLS = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {
