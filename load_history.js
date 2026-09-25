@@ -17,7 +17,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const duckdb = require('duckdb');
+const { DuckDBInstance } = require('@duckdb/node-api');
 const { ingestCsvInto, TABLE_SCHEMA_SQL } = require('./ingest');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -30,13 +30,25 @@ if (!csvPath) {
   process.exit(1);
 }
 
-const db = new duckdb.Database(DB_PATH);
-const con = db.connect();
-function run(sql) {
-  return new Promise((resolve, reject) => con.all(sql, (err, rows) => (err ? reject(err) : resolve(rows))));
+// @duckdb/node-api (the maintained DuckDB client; the old `duckdb` package
+// is deprecated and its prebuilt binaries are gone, so installs fell back to
+// compiling DuckDB from source and Railway builds hung).
+// run() returns plain row objects like the old client did; BIGINTs come back
+// as JS bigint, so they're turned into Numbers (all our counts fit safely).
+const dbReady = DuckDBInstance.create(DB_PATH).then((instance) => instance.connect());
+const toPlain = (v) => (typeof v === 'bigint' ? Number(v) : v);
+
+async function run(sql) {
+  const con = await dbReady;
+  const reader = await con.runAndReadAll(sql);
+  return reader.getRowObjectsJS().map((row) => {
+    for (const k of Object.keys(row)) row[k] = toPlain(row[k]);
+    return row;
+  });
 }
-function exec(sql) {
-  return new Promise((resolve, reject) => con.run(sql, (err) => (err ? reject(err) : resolve())));
+async function exec(sql) {
+  const con = await dbReady;
+  await con.run(sql);
 }
 
 (async () => {

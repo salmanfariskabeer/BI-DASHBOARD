@@ -10,7 +10,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "duckdb": "^1.4.4",
+    "@duckdb/node-api": "1.4.4-r.4",
     "express": "^4.22.2",
     "multer": "^2.2.0",
     "xlsx": "^0.18.5"
