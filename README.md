@@ -231,25 +231,34 @@ Manual drag-and-drop/file-picker upload on the dashboard still works too
 (e.g. for ad-hoc testing), and there's a **⟳ Refresh from server** button to
 re-check without a full page reload.
 
-## Sales targets: Settings page + Target vs Actual report
+## Monthly targets: Settings import + Target vs Actual (day-wise) report
 
-**Settings → Assign Target**: pick an outlet, then set a target amount for
-each class within it (blank = no target for that class). Saves per-field as
-you tab/click away — no separate "Save" button, no Save-and-lose-your-place.
+**Settings → Monthly Targets**: import the monthly target workbook (e.g.
+`targets-all-outlets-2026-09.xlsx`: one sheet per outlet, title
+`Sales Target Report – <OUTLET> – YYYY-MM`, columns Class Name / Staff Name /
+Supervisor / Sales Target / Profit Target). The import replaces that month's
+targets for every outlet in the file. Rows with zero targets and the
+TOTAL/ASSIGNED rows are skipped. Class names are mapped to the sales data's
+spelling (e.g. `FISH & SEA FOOD` → `FISH`, `FOOTWEAR` → `FOOT WEAR`; see
+`CLASS_ALIASES` in `server.js`), and any outlet or class it can't match is
+listed after the import. Values can also be edited by hand per month, outlet
+and class.
 
-**Reports → Target vs Actual**: one row per outlet — its target (the sum of
-whichever classes have one set) against its *whole* actual sales (every
-class, targeted or not), with achievement % and how much more is needed (or
-how far over) to hit it. Click ▸ to drill into an outlet and see the same
-breakdown per class — including classes with sales but no target set
-(shown with actual sales but a blank target/%, so nothing's hidden), and
-classes with a target but zero sales (shown as 100% still needed). Exports
-to CSV/Excel like every other report.
-
-Respects the global date filter like everything else — "actual" always
-means actual sales in whatever date range is currently selected, so this
-report answers "vs. target, how's this month/quarter/custom range going,"
-not a fixed period baked into the target itself.
+**Reports → Target vs Actual**: pick the month, and "Actual sales till"
+defaults to **yesterday** (capped at the last date loaded on the server).
+- Daily target = monthly target ÷ days in the month; target till date =
+  daily target × days elapsed.
+- KPI cards: month target, target till date, actual till date, achievement %,
+  variance, balance for the month, required per day for the remaining days,
+  run-rate forecast, and profit (GP) vs profit target.
+- Outlet → class table (with staff and supervisor), a day-wise table
+  (choose outlet/class) with daily and cumulative achievement, and an
+  outlet × day grid.
+- Outlet actuals count only classes that have a target. Sales in other classes
+  (e.g. shop consumption) are shown separately and not counted.
+- Excel export gives three sheets: Outlet & Class, Day-wise, Outlet x Day.
+- Only the top-bar Outlet filter applies; the date, category, class and
+  supplier filters don't.
 
 ## Outlet filter: tick which ones to include
 

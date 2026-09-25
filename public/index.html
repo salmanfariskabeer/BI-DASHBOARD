@@ -537,6 +537,25 @@ table.pivot tr.total-row:hover td{background:var(--paper-2);}
 .legend-dot{ display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:3px; vertical-align:middle; }
 .legend-dot.above{ background:var(--green); }
 .legend-dot.below{ background:var(--brick); }
+.legend-dot.warn{ background:#B7791F; }
+/* Target vs Actual */
+.ach-good{ color:var(--green) !important; font-weight:600; }
+.ach-warn{ color:#B7791F !important; font-weight:600; }
+.ach-bad{ color:var(--brick) !important; font-weight:600; }
+.tgt-controls{ padding:4px 18px 0; }
+.tgt-warn{ color:var(--brick) !important; font-style:normal !important; }
+.tgt-kpis{ margin:14px 18px 8px; }
+.tgt-kpis .kpi-value{ font-size:19px; }
+.kpi-sub{ font-size:11px; color:var(--text-dim); margin-top:3px; }
+.report-subtitle{ font-family:var(--serif, Georgia, serif); font-weight:700; font-size:15px; color:var(--ink); margin:26px 18px 0; padding-bottom:6px; border-bottom:1px solid var(--line); }
+.tgt-src{ font-size:10.5px; color:var(--text-dim); font-style:italic; }
+td.tgt-staff{ max-width:260px; overflow:hidden; text-overflow:ellipsis; font-family:var(--sans); font-size:11px; }
+tr.tgt-other td{ font-style:italic; color:var(--text-dim); }
+table.tgt-matrix th, table.tgt-matrix td{ padding:5px 6px; font-size:11px; }
+table.tgt-matrix td.ach-good{ background:rgba(31,92,77,0.12); }
+table.tgt-matrix td.ach-warn{ background:rgba(183,121,31,0.14); }
+table.tgt-matrix td.ach-bad{ background:rgba(143,51,43,0.10); }
+.mx-wd{ font-size:9px; opacity:0.75; font-weight:400; }
 #reportOutput table.pivot{ margin:0 18px 18px; width:calc(100% - 36px); }
 #reportOutput{ padding-bottom:6px; overflow-x:auto; }
 /* Matches the specificity of the level-N border-left rules above (table.pivot
@@ -928,10 +947,17 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
 
     <!-- ===================== SETTINGS PAGE ===================== -->
     <div class="page hidden" id="page-settings">
-      <div class="report-title" style="margin-bottom:14px;">Assign Target</div>
-      <p class="pivot-note" style="margin:0 0 14px;">Set a sales target for each class within an outlet. These feed the
-        <b>Target vs Actual</b> report under Reports. A blank field means no target is set for that class.</p>
+      <div class="report-title" style="margin-bottom:14px;">Monthly Targets</div>
+      <p class="pivot-note" style="margin:0 0 14px;">Targets are set per <b>month, outlet and class</b> (sales and profit) and feed the
+        <b>Target vs Actual</b> report under Reports. Easiest: import the monthly target Excel file (one sheet per outlet, as exported
+        from the target system) — it replaces that month's targets for every outlet in the file. You can also edit any value below by hand.</p>
+      <div class="filterbar" style="margin-bottom:10px;">
+        <div class="filter-group"><label>Import target Excel (.xlsx)</label><input type="file" id="targetImportFile" accept=".xlsx,.xls"></div>
+        <button class="xlsx-btn" id="targetImportBtn" style="align-self:flex-end">Import targets</button>
+      </div>
+      <div id="targetImportResult" class="pivot-note" style="margin:0 0 18px;padding:0;font-style:normal;font-size:12.5px;line-height:1.6"></div>
       <div class="filterbar" style="margin-bottom:18px;">
+        <div class="filter-group"><label>Month</label><input type="month" id="settings_month"></div>
         <div class="filter-group"><label>Outlet</label><select id="settings_outlet"></select></div>
       </div>
       <div id="settingsTargetsWrap"></div>
@@ -1095,16 +1121,24 @@ const API = {
     const res = await fetch('/api/status');
     return res.json();
   },
-  async getTargets(){
-    const res = await fetch('/api/targets');
-    if(!res.ok) throw new Error('Could not load targets');
-    return (await res.json()).targets;
-  },
-  saveTarget(outlet, class_, target){ return API._post('/api/targets', { outlet, class_, target }); },
-  async deleteTarget(outlet, class_){
-    const res = await fetch('/api/targets', { method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({outlet, class_}) });
+  async getTargets(month){
+    const res = await fetch('/api/targets'+(month?'?month='+encodeURIComponent(month):''));
     const json = await res.json().catch(()=>({}));
-    if(!res.ok) throw new Error(json.error || 'Could not delete target');
+    if(!res.ok) throw new Error(json.error || 'Could not load targets');
+    return json; // { months, month, targets }
+  },
+  saveTarget(t){ return API._post('/api/targets', t); },
+  async importTargets(file){
+    const fd = new FormData(); fd.append('file', file);
+    const res = await fetch('/api/targets/import', { method:'POST', body:fd });
+    const json = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(json.error || ('Import failed: '+res.status));
+    return json;
+  },
+  async targetActuals(from, to){
+    const res = await fetch('/api/target-actuals?from='+from+'&to='+to);
+    const json = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(json.error || 'Could not load actual sales');
     return json;
   }
 };
@@ -2288,6 +2322,29 @@ function downloadCSV(csv, filename){
   URL.revokeObjectURL(url);
 }
 const XLSX_NUMBER_FORMATS = { money:'#,##0.00', number:'#,##0', percent:'0.0%', text:'@' };
+// Several sheets in one workbook: [{name, rows, colTypes, headerRows}]
+function downloadXLSXSheets(sheets, filename){
+  try{
+    const wb = XLSX.utils.book_new();
+    for(const sh of sheets){
+      const ws = XLSX.utils.aoa_to_sheet(sh.rows);
+      const range = XLSX.utils.decode_range(ws['!ref']);
+      for(let r = sh.headerRows||1; r <= range.e.r; r++){
+        for(let c = 0; c <= range.e.c; c++){
+          const type = sh.colTypes[c];
+          const cell = ws[XLSX.utils.encode_cell({r,c})];
+          if(type && type!=='text' && cell && typeof cell.v === 'number') cell.z = type==='money' ? '#,##0' : (XLSX_NUMBER_FORMATS[type] || '#,##0');
+        }
+      }
+      ws['!cols'] = sh.colTypes.map((t,i)=> i===0 ? {wch:38} : {wch: t==='text'?30:14});
+      XLSX.utils.book_append_sheet(wb, ws, sh.name.slice(0,31));
+    }
+    XLSX.writeFile(wb, filename);
+  }catch(e){
+    console.error('XLSX export error:', e);
+    showPivotMessage('Could not build the Excel file — try CSV instead.');
+  }
+}
 function downloadXLSX(rows, filename, sheetName, colTypes){
   try{
     const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -2393,7 +2450,7 @@ const REPORT_DEFS = {
   ytd:        { name:'YTD Report',             desc:'Year to date vs the same period last year, with variance, drillable.', needsDim:false,  needsMetric:false, needsDate:true,  needsCustomDate:false },
   customdate: { name:'Custom Date Variance',   desc:'Compare any two date ranges you choose — e.g. last week vs the week before. Drillable.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:true },
   aboveavg:   { name:'Above / Below Average',  desc:'Rank everything in a dimension against its own average.', needsDim:true,  needsMetric:true,  needsDate:false, needsCustomDate:false },
-  target:     { name:'Target vs Actual',       desc:'Sales targets by outlet and class, vs actual — set targets in Settings.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:false },
+  target:     { name:'Target vs Actual',       desc:'Monthly target vs actual till yesterday — pro-rata daily target, achievement %, balance, required per day, day-wise and outlet × day. Import targets in Settings.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:false },
 };
 let currentReport = 'sales';
 let lastReportExport = null;
@@ -2857,102 +2914,258 @@ async function renderAboveBelowAverage(outEl, dim, metric, myGen){
 }
 
 /* ============================================================
-   TARGET VS ACTUAL — targets are set per (outlet, class) in Settings and
-   stored server-side; this report joins them against actual sales.
-   Outlet rows show the WHOLE outlet's actual sales (every class, targeted
-   or not) against the sum of only the classes that outlet actually has
-   targets for -- so an outlet with no targets set yet still shows its real
-   sales total, just with no target/%% to compare against. Expanding an
-   outlet shows the per-class breakdown, including classes with a target
-   but zero sales, and classes with sales but no target assigned.
+   TARGET vs ACTUAL (day-wise) — monthly targets per outlet x class
+   (imported in Settings) against actual sales up to "yesterday".
+   Pro-rata: daily target = monthly target / days in the month, so the
+   target "till yesterday" = monthly target x days elapsed / days in month.
+   Outlet actuals count only the classes that HAVE a target, so the
+   comparison is like-for-like; sales in classes with no target are shown
+   separately ("Other sales, no target") instead of being mixed in.
+   Uses its own Month / "Actual till" controls; of the global filters only
+   the Outlet tick-list applies (date/category/class/supplier don't).
    ============================================================ */
-function targetVarianceCell(target, actual){
-  if(target==null) return '<span style="color:var(--text-dim)">—</span>';
-  if(actual>=target) return `<span style="color:var(--green)">+${fmtMoney(actual-target)} over</span>`;
-  return `${fmtMoney(target-actual)} needed`;
+const tgtState = { month:null, asOf:null, dwOutlet:'__all', dwClass:'__all', matrixMode:'pct' };
+let tgtCache = null; // { key:'from|to', rows } -- actual sales for the last range fetched
+function parseYMD(s){ const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d); }
+function fmtDayMon(d){ return d.getDate()+' '+d.toLocaleString('en-GB',{month:'short'}); }
+function monthLabel(m){ const [y,mm]=m.split('-').map(Number); return new Date(y,mm-1,1).toLocaleString('en-GB',{month:'long',year:'numeric'}); }
+function achCls(p){ if(p==null||!isFinite(p)) return ''; return p>=1?'ach-good':p>=0.9?'ach-warn':'ach-bad'; }
+function achTd(p){ return `<td class="${achCls(p)}">${fmtPct(p)}</td>`; }
+function varTd(v){
+  if(v==null||!isFinite(v)) return '<td>—</td>';
+  return `<td class="${v>=0?'ach-good':'ach-bad'}">${v>=0?'+':''}${fmtMoney(v)}</td>`;
+}
+const nz = (v)=> (v==null||!isFinite(v)) ? null : v;
+
+// All the per-row maths in one place, so every table/KPI/export agrees.
+function tgtMetrics(st, pt, actual, gp, elapsed, daysInMonth){
+  const remaining = daysInMonth - elapsed;
+  const tdTarget = st*elapsed/daysInMonth, tdProfit = pt*elapsed/daysInMonth;
+  const balance = st - actual;
+  return {
+    st, pt, actual, gp,
+    daily: st/daysInMonth, dailyProfit: pt/daysInMonth,
+    tdTarget, tdProfit,
+    ach: tdTarget>0 ? actual/tdTarget : null,
+    variance: actual - tdTarget,
+    monthAch: st>0 ? actual/st : null,
+    balance,
+    reqPerDay: remaining>0 ? Math.max(balance,0)/remaining : null,
+    gpAch: tdProfit>0 ? gp/tdProfit : null,
+    forecast: elapsed>0 ? actual/elapsed*daysInMonth : null,
+  };
+}
+
+async function loadTargetActuals(from, to){
+  const key = from+'|'+to;
+  if(tgtCache && tgtCache.key===key) return tgtCache.rows;
+  const rows = (await API.targetActuals(from, to)).rows;
+  tgtCache = { key, rows };
+  return rows;
 }
 
 async function renderTargetReport(outEl, myGen){
-  const bf = baseFilters();
-  const [outletRes, allTargets] = await Promise.all([
-    API.aggregate({ filters: bf, extra:[], groupBy:'outlet', limit:null, sortMetric:'sales', sortDir:'desc' }),
-    API.getTargets(),
-  ]);
-  if(myGen!==undefined && myGen!==reportRenderGen) return;
+  // 1. Which month + how far into it.
+  const tg = await API.getTargets(tgtState.month);
+  if(myGen!==reportRenderGen) return;
+  if(!tg.months.length){
+    outEl.innerHTML = '<div class="report-title">Target vs Actual</div><p class="pivot-note">No targets loaded yet — go to <b>Settings → Monthly Targets</b> and import the target Excel file.</p>';
+    lastReportExport = null; return;
+  }
+  const month = tg.month; tgtState.month = month;
+  const [yy,mm] = month.split('-').map(Number);
+  const monthStart = new Date(yy,mm-1,1), monthEnd = new Date(yy,mm,0), dim = monthEnd.getDate();
+  const today = new Date(); today.setHours(0,0,0,0);
+  const yesterday = addDays(today,-1);
+  const dataMax = getDataMaxDate();
+  const notes = [];
+  let asOf = tgtState.asOf ? parseYMD(tgtState.asOf) : yesterday;
+  if(asOf > monthEnd) asOf = monthEnd;
+  if(asOf > dataMax && dataMax >= monthStart){
+    notes.push(`Sales data on the server only goes up to <b>${fmtDayMon(dataMax)}</b> — figures are shown till then.`);
+    asOf = dataMax;
+  }
+  const elapsed = asOf >= monthStart ? asOf.getDate() : 0;
+  const remaining = dim - elapsed;
+  if(elapsed===0) notes.push('No sales days in this month yet (as of the selected date) — targets are shown with zero actuals.');
 
-  if(outletRes.rows.length===0){
-    outEl.innerHTML = '<p style="padding:20px;color:var(--text-dim)">No rows match this report for the current filters.</p>';
-    lastReportExport = null;
-    return;
+  const actualRows = elapsed ? await loadTargetActuals(fmtDate(monthStart), fmtDate(asOf)) : [];
+  if(myGen!==reportRenderGen) return;
+
+  // 2. Index targets and actuals.
+  const fo = filters.outlet;
+  const outletAllowed = (o)=> !Array.isArray(fo) || fo.includes(o);
+  const tByOutlet = new Map();
+  for(const t of tg.targets){
+    if(!outletAllowed(t.outlet)) continue;
+    if(!tByOutlet.has(t.outlet)) tByOutlet.set(t.outlet, []);
+    tByOutlet.get(t.outlet).push(t);
+  }
+  const dayKeys = []; for(let d=1; d<=elapsed; d++) dayKeys.push(fmtDate(new Date(yy,mm-1,d)));
+  const act = new Map();      // outlet|class -> {sales,cost}
+  const actDay = new Map();   // outlet|class|day -> {sales,cost}
+  const otherByOutlet = new Map(); // outlet -> sales in classes with no target
+  const targetedKey = new Set(tg.targets.map(t=>t.outlet+'|'+t.class_));
+  for(const r of actualRows){
+    const k = r.outlet+'|'+r.class_;
+    if(!targetedKey.has(k)){ otherByOutlet.set(r.outlet, (otherByOutlet.get(r.outlet)||0) + r.sales); continue; }
+    const a = act.get(k) || {sales:0,cost:0}; a.sales+=r.sales; a.cost+=r.cost; act.set(k,a);
+    actDay.set(k+'|'+r.day, {sales:r.sales, cost:r.cost});
   }
 
-  const targetsByOutlet = new Map();
-  for(const t of allTargets){
-    if(!targetsByOutlet.has(t.outlet)) targetsByOutlet.set(t.outlet, new Map());
-    targetsByOutlet.get(t.outlet).set(t.class_, t.target_amount);
+  // 3. Outlet + class rows.
+  const outlets = [];
+  for(const [outlet, list] of tByOutlet){
+    const classes = list.map(t=>{
+      const a = act.get(outlet+'|'+t.class_) || {sales:0,cost:0};
+      return { ...t, m: tgtMetrics(t.sales_target, t.profit_target, a.sales, a.sales-a.cost, elapsed, dim) };
+    }).sort((a,b)=>b.sales_target-a.sales_target);
+    const sum = (f)=> classes.reduce((s,c)=>s+f(c),0);
+    const m = tgtMetrics(sum(c=>c.sales_target), sum(c=>c.profit_target), sum(c=>c.m.actual), sum(c=>c.m.gp), elapsed, dim);
+    outlets.push({ outlet, classes, m, other: otherByOutlet.get(outlet)||0 });
   }
+  outlets.sort((a,b)=>b.m.st-a.m.st);
+  const gsum = (f)=> outlets.reduce((s,o)=>s+f(o),0);
+  const G = tgtMetrics(gsum(o=>o.m.st), gsum(o=>o.m.pt), gsum(o=>o.m.actual), gsum(o=>o.m.gp), elapsed, dim);
+  const gOther = gsum(o=>o.other);
+  for(const o of outlets) if(elapsed>0 && o.m.actual===0) notes.push(`<b>${escapeHtml(o.outlet)}</b> has a target but no sales in the data for this period — check the outlet name in the iTrade export.`);
+  const withoutTarget = [...otherByOutlet.keys()].filter(o=>!tByOutlet.has(o) && outletAllowed(o));
 
-  const rows = [];
-  const exportRows = [];
-  let grandTarget = 0, grandActual = 0, anyTarget = false;
+  const tillLbl = elapsed ? fmtDayMon(asOf) : '—';
 
-  for(const r of outletRes.rows){
-    const outletTargets = targetsByOutlet.get(r.key) || new Map();
-    const outletTargetSum = outletTargets.size ? [...outletTargets.values()].reduce((a,b)=>a+b,0) : null;
-    if(outletTargetSum!=null){ grandTarget += outletTargetSum; anyTarget = true; }
-    grandActual += r.sales;
+  // 4. Header controls + KPI cards.
+  let html = `<div class="report-title">Target vs Actual — ${escapeHtml(monthLabel(month))}</div>`;
+  html += `<div class="pivot-controls tgt-controls">
+    <div class="filter-group"><label>Target month</label><select id="tgt_month">${tg.months.map(x=>`<option value="${x}"${x===month?' selected':''}>${escapeHtml(monthLabel(x))}</option>`).join('')}</select></div>
+    <div class="filter-group"><label>Actual sales till</label><input type="date" id="tgt_asof" value="${elapsed?fmtDate(asOf):''}" min="${fmtDate(monthStart)}" max="${fmtDate(monthEnd)}"></div>
+    ${tgtState.asOf ? '<button class="layout-btn" id="tgt_asof_reset">Back to yesterday</button>' : ''}
+  </div>`;
+  html += `<p class="pivot-note">Daily target = monthly target ÷ ${dim} days. Target till ${tillLbl} = ${elapsed} of ${dim} days (${fmtPct(elapsed/dim)} of the month). Today's sales are not included.${Array.isArray(fo)?' Outlet filter from the top bar is applied.':''}</p>`;
+  for(const n of notes) html += `<p class="pivot-note tgt-warn">⚠ ${n}</p>`;
 
-    const path = '>>outlet:'+r.key;
+  const card = (label, value, sub, cls)=>`<div class="kpi-card ${cls||''}"><div class="kpi-label">${label}</div><div class="kpi-value">${value}</div>${sub?`<div class="kpi-sub">${sub}</div>`:''}</div>`;
+  html += '<div class="kpi-grid tgt-kpis">';
+  html += card('Month Target', fmtMoney(G.st), 'Daily target '+fmtMoney(G.daily));
+  html += card('Target till '+tillLbl, fmtMoney(G.tdTarget), `${elapsed} of ${dim} days`, 'ink');
+  html += card('Actual till '+tillLbl, fmtMoney(G.actual), 'Avg/day '+(elapsed?fmtMoney(G.actual/elapsed):'—'), 'green');
+  html += card('Achievement (till date)', `<span class="${achCls(G.ach)}">${fmtPct(G.ach)}</span>`, `Variance <span class="${G.variance>=0?'ach-good':'ach-bad'}">${G.variance>=0?'+':''}${fmtMoney(G.variance)}</span>`);
+  html += card('Balance to Achieve (month)', fmtMoney(Math.max(G.balance,0)), `Month achieved ${fmtPct(G.monthAch)}`);
+  html += card(`Required per Day`, G.reqPerDay!=null?fmtMoney(G.reqPerDay):'—', remaining>0?`for the remaining ${remaining} day${remaining>1?'s':''}`:'month complete', 'ink');
+  html += card('Forecast Month-End', fmtMoney(G.forecast), `at current pace = <span class="${achCls(G.forecast!=null&&G.st?G.forecast/G.st:null)}">${fmtPct(G.forecast!=null&&G.st?G.forecast/G.st:null)}</span> of target`);
+  html += card('Profit (GP) till '+tillLbl, fmtMoney(G.gp), `Target ${fmtMoney(G.tdProfit)} · <span class="${achCls(G.gpAch)}">${fmtPct(G.gpAch)}</span>`, 'green');
+  html += '</div>';
+
+  // 5. Outlet / class table.
+  const heads = ['Outlet / Class','Month Target','Daily Target','Target till '+tillLbl,'Actual till '+tillLbl,'Ach %','Variance','Month Ach %','Balance to Achieve',`Req./Day (${remaining}d left)`,'Profit Tgt till '+tillLbl,'Actual GP','GP Ach %','Staff','Supervisor'];
+  const numCells = (m)=> `<td>${fmtMoney(m.st)}</td><td>${fmtMoney(m.daily)}</td><td>${fmtMoney(m.tdTarget)}</td><td><b>${fmtMoney(m.actual)}</b></td>${achTd(m.ach)}${varTd(m.variance)}<td>${fmtPct(m.monthAch)}</td><td>${fmtMoney(Math.max(m.balance,0))}</td><td>${m.reqPerDay!=null?fmtMoney(m.reqPerDay):'—'}</td><td>${fmtMoney(m.tdProfit)}</td><td>${fmtMoney(m.gp)}</td>${achTd(m.gpAch)}`;
+  html += '<div class="report-subtitle">Outlet &amp; class — target vs actual till '+tillLbl+'</div>';
+  html += '<table class="pivot tgt-table"><thead><tr>'+heads.map((h,i)=>`<th${i===0||i>=13?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
+  const expRows = [];
+  const expRow = (label, m, staff, sup)=>[label, m.st, m.daily, m.tdTarget, m.actual, nz(m.ach), m.variance, nz(m.monthAch), Math.max(m.balance,0), m.reqPerDay, m.tdProfit, m.gp, nz(m.gpAch), staff||'', sup||''];
+  for(const o of outlets){
+    const path = '>>tgt:'+o.outlet;
     const expanded = reportExpandedPaths.has(path);
-    rows.push({ level:0, label:r.key, path, target:outletTargetSum, actual:r.sales, hasChildren:true, expanded });
-    exportRows.push([r.key, outletTargetSum, r.sales, outletTargetSum?r.sales/outletTargetSum:null, outletTargetSum!=null?outletTargetSum-r.sales:null]);
-
-    if(expanded){
-      const classRes = await API.aggregate({ filters: bf, extra:[{dim:'outlet', values:[r.key]}], groupBy:'class_', limit:null, sortMetric:'sales', sortDir:'desc' });
-      if(myGen!==undefined && myGen!==reportRenderGen) return;
-      const actualByClass = new Map(classRes.rows.map(cr=>[cr.key, cr.sales]));
-      const allClassKeys = new Set([...actualByClass.keys(), ...outletTargets.keys()]);
-      const classEntries = [...allClassKeys].map(k=>({
-        key:k, actual: actualByClass.get(k)||0, target: outletTargets.has(k) ? outletTargets.get(k) : null,
-      }));
-      classEntries.sort((a,b)=> (b.target ?? -1) - (a.target ?? -1) || b.actual - a.actual);
-      for(const ce of classEntries){
-        rows.push({ level:1, label:ce.key, target:ce.target, actual:ce.actual, hasChildren:false });
-        exportRows.push(['  '+ce.key, ce.target, ce.actual, ce.target?ce.actual/ce.target:null, ce.target!=null?ce.target-ce.actual:null]);
+    html += `<tr class="level-0 ${o.m.ach!=null?(o.m.ach>=1?'above-avg':'below-avg'):''}"><td class="rowhead"><span class="expand-toggle" data-path="${escapeAttr(path)}">${expanded?'▾':'▸'}</span>${escapeHtml(o.outlet)}</td>${numCells(o.m)}<td class="rowhead"></td><td class="rowhead"></td></tr>`;
+    expRows.push(expRow(o.outlet, o.m));
+    for(const c of o.classes){
+      if(expanded){
+        html += `<tr class="level-1"><td class="rowhead"><span class="expand-toggle"></span>${escapeHtml(c.class_)}${c.source_class&&c.source_class!==c.class_?` <span class="tgt-src" title="Name in the target file">(${escapeHtml(c.source_class)})</span>`:''}</td>${numCells(c.m)}<td class="rowhead tgt-staff" title="${escapeAttr(c.staff||'')}">${escapeHtml(c.staff||'')}</td><td class="rowhead tgt-staff">${escapeHtml(c.supervisor||'')}</td></tr>`;
       }
+      expRows.push(expRow('   '+c.class_, c.m, c.staff, c.supervisor));
     }
+    if(expanded && o.other){
+      html += `<tr class="level-1 tgt-other"><td class="rowhead"><span class="expand-toggle"></span>Other sales (classes with no target)</td><td>—</td><td>—</td><td>—</td><td>${fmtMoney(o.other)}</td><td colspan="10" class="rowhead">not counted in achievement</td></tr>`;
+    }
+    if(o.other) expRows.push(['   Other sales (no target, not counted)', null, null, null, o.other, null, null, null, null, null, null, null, null, '', '']);
   }
-
-  const grandPct = grandTarget ? grandActual/grandTarget : null;
-
-  let html = '<div class="report-title">Target vs Actual</div>';
-  if(!anyTarget){
-    html += '<p class="pivot-note">No targets set yet — go to Settings → Assign Target to set one for each outlet/class you want to track.</p>';
-  }
-  html += '<table class="pivot"><thead><tr><th class="rowhead">Outlet / Class</th><th>Target (AED)</th><th>Actual Sales (AED)</th><th>Achievement %</th><th>Variance to Target</th></tr></thead><tbody>';
-  for(const row of rows){
-    const pct = row.target ? row.actual/row.target : null;
-    const rowCls = 'level-'+row.level + (row.target!=null ? (row.actual>=row.target?' above-avg':' below-avg') : '');
-    const toggle = row.hasChildren ? `<span class="expand-toggle" data-path="${escapeAttr(row.path)}">${row.expanded?'▾':'▸'}</span>` : '<span class="expand-toggle"></span>';
-    html += `<tr class="${rowCls}"><td class="rowhead">${toggle}${escapeHtml(row.label)}</td>`;
-    html += `<td>${row.target!=null?fmtMoney(row.target):'—'}</td>`;
-    html += `<td>${fmtMoney(row.actual)}</td>`;
-    html += `<td>${pct!=null?fmtPct(pct):'—'}</td>`;
-    html += `<td>${targetVarianceCell(row.target, row.actual)}</td>`;
-    html += '</tr>';
-  }
-  html += `<tr class="total-row"><td class="rowhead">Grand Total</td><td>${grandTarget?fmtMoney(grandTarget):'—'}</td><td>${fmtMoney(grandActual)}</td><td>${grandPct!=null?fmtPct(grandPct):'—'}</td><td>${targetVarianceCell(grandTarget||null, grandActual)}</td></tr>`;
+  html += `<tr class="total-row"><td class="rowhead">Grand Total</td>${numCells(G)}<td></td><td></td></tr>`;
   html += '</tbody></table>';
-  html += '<p class="report-legend"><span class="legend-dot above"></span> At/above target &nbsp; <span class="legend-dot below"></span> Below target</p>';
-  html += '<p class="pivot-note">Click ▸ to see the class breakdown for an outlet.</p>';
+  html += `<p class="report-legend"><span class="legend-dot above"></span> At/above 100% &nbsp; <span class="legend-dot warn"></span> 90–99% &nbsp; <span class="legend-dot below"></span> Below 90% — of the target till ${tillLbl}. Click ▸ for the class breakdown with staff and supervisor.</p>`;
+  if(gOther) html += `<p class="pivot-note">Other sales in classes that have no target (e.g. shop consumption): ${fmtMoney(gOther)} — shown per outlet, not counted in achievement.</p>`;
+  if(withoutTarget.length) html += `<p class="pivot-note">Outlets with sales but no target this month (not shown): ${withoutTarget.map(escapeHtml).join(', ')}.</p>`;
+
+  // 6. Day-wise table for a chosen outlet/class scope.
+  if(tgtState.dwOutlet!=='__all' && !tByOutlet.has(tgtState.dwOutlet)){ tgtState.dwOutlet='__all'; tgtState.dwClass='__all'; }
+  const scopeTargets = [];
+  for(const o of outlets) if(tgtState.dwOutlet==='__all' || o.outlet===tgtState.dwOutlet) for(const c of o.classes) scopeTargets.push(c);
+  const classOpts = [...new Set(scopeTargets.map(c=>c.class_))].sort();
+  if(tgtState.dwClass!=='__all' && !classOpts.includes(tgtState.dwClass)) tgtState.dwClass='__all';
+  const pairs = scopeTargets.filter(c=> tgtState.dwClass==='__all' || c.class_===tgtState.dwClass);
+  const pST = pairs.reduce((s,c)=>s+c.sales_target,0), pPT = pairs.reduce((s,c)=>s+c.profit_target,0);
+  const dT = pST/dim, dP = pPT/dim;
+  html += '<div class="report-subtitle">Day-wise — daily target vs actual</div>';
+  html += `<div class="pivot-controls tgt-controls">
+    <div class="filter-group"><label>Outlet</label><select id="tgt_dw_outlet"><option value="__all">All outlets (${outlets.length})</option>${outlets.map(o=>`<option value="${escapeAttr(o.outlet)}"${o.outlet===tgtState.dwOutlet?' selected':''}>${escapeHtml(o.outlet)}</option>`).join('')}</select></div>
+    <div class="filter-group"><label>Class</label><select id="tgt_dw_class"><option value="__all">All target classes</option>${classOpts.map(c=>`<option value="${escapeAttr(c)}"${c===tgtState.dwClass?' selected':''}>${escapeHtml(c)}</option>`).join('')}</select></div>
+  </div>`;
+  const dwHeads = ['Date','Day','Daily Target','Actual','Ach %','Variance','Cum. Target','Cum. Actual','Cum. Ach %','Daily Profit Tgt','Actual GP','GP Ach %'];
+  html += '<table class="pivot tgt-table"><thead><tr>'+dwHeads.map((h,i)=>`<th${i<2?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
+  const dwExp = [];
+  let cumT=0, cumA=0, cumGP=0;
+  for(const day of dayKeys){
+    let s=0, c=0;
+    for(const p of pairs){ const a = actDay.get(p.outlet+'|'+p.class_+'|'+day); if(a){ s+=a.sales; c+=a.cost; } }
+    const gp = s-c; cumT+=dT; cumA+=s; cumGP+=gp;
+    const d = parseYMD(day);
+    const ach = dT>0?s/dT:null, cach = cumT>0?cumA/cumT:null, gpa = dP>0?gp/dP:null;
+    html += `<tr><td class="rowhead">${fmtDayMon(d)}</td><td class="rowhead">${WEEKDAYS[d.getDay()]}</td><td>${fmtMoney(dT)}</td><td><b>${fmtMoney(s)}</b></td>${achTd(ach)}${varTd(s-dT)}<td>${fmtMoney(cumT)}</td><td>${fmtMoney(cumA)}</td>${achTd(cach)}<td>${fmtMoney(dP)}</td><td>${fmtMoney(gp)}</td>${achTd(gpa)}</tr>`;
+    dwExp.push([day, WEEKDAYS[d.getDay()], dT, s, nz(ach), s-dT, cumT, cumA, nz(cach), dP, gp, nz(gpa)]);
+  }
+  const tdT = dT*elapsed, tdP = dP*elapsed;
+  html += `<tr class="total-row"><td class="rowhead">Till ${tillLbl}</td><td class="rowhead">${elapsed} days</td><td>${fmtMoney(tdT)}</td><td>${fmtMoney(cumA)}</td>${achTd(tdT>0?cumA/tdT:null)}${varTd(cumA-tdT)}<td>${fmtMoney(cumT)}</td><td>${fmtMoney(cumA)}</td>${achTd(cumT>0?cumA/cumT:null)}<td>${fmtMoney(tdP)}</td><td>${fmtMoney(cumGP)}</td>${achTd(tdP>0?cumGP/tdP:null)}</tr>`;
+  html += '</tbody></table>';
+  const pBal = Math.max(pST-cumA,0);
+  html += `<p class="pivot-note">Month target for this selection: ${fmtMoney(pST)} · achieved ${fmtPct(pST?cumA/pST:null)} · balance ${fmtMoney(pBal)}${remaining>0?` · needs ${fmtMoney(pBal/remaining)} per day for the remaining ${remaining} days`:''}.</p>`;
+
+  // 7. Outlet x day matrix.
+  html += '<div class="report-subtitle">Outlet × day — each day\'s sales vs that outlet\'s daily target</div>';
+  html += `<div class="pivot-controls tgt-controls"><div class="filter-group"><label>Show</label><select id="tgt_mx_mode"><option value="pct"${tgtState.matrixMode==='pct'?' selected':''}>Achievement %</option><option value="amt"${tgtState.matrixMode==='amt'?' selected':''}>Actual sales (AED)</option></select></div></div>`;
+  html += '<table class="pivot tgt-matrix"><thead><tr><th class="rowhead">Outlet</th><th>Daily Tgt</th>'+dayKeys.map(dk=>{ const d=parseYMD(dk); return `<th title="${WEEKDAYS[d.getDay()]} ${fmtDayMon(d)}">${d.getDate()}<br><span class="mx-wd">${WEEKDAYS[d.getDay()].slice(0,2)}</span></th>`; }).join('')+'<th>Till date</th></tr></thead><tbody>';
+  const mxExp = [];
+  const mxCell = (actual, target, title)=>{
+    const p = target>0 ? actual/target : null;
+    const txt = tgtState.matrixMode==='pct' ? (p!=null?Math.round(p*100)+'%':'—') : fmtMoney(actual);
+    return `<td class="${achCls(p)}" title="${escapeAttr(title+': '+fmtMoney(actual)+' of '+fmtMoney(target)+' ('+fmtPct(p)+')')}">${txt}</td>`;
+  };
+  const dayTotals = dayKeys.map(()=>0);
+  for(const o of outlets){
+    const daily = o.m.daily;
+    let row = `<tr><td class="rowhead">${escapeHtml(o.outlet)}</td><td>${fmtMoney(daily)}</td>`;
+    const exp = [o.outlet, daily];
+    dayKeys.forEach((dk,i)=>{
+      let s=0; for(const c of o.classes){ const a = actDay.get(o.outlet+'|'+c.class_+'|'+dk); if(a) s+=a.sales; }
+      dayTotals[i]+=s; exp.push(s);
+      row += mxCell(s, daily, o.outlet+' '+fmtDayMon(parseYMD(dk)));
+    });
+    row += mxCell(o.m.actual, o.m.tdTarget, o.outlet+' till '+tillLbl) + '</tr>';
+    exp.push(o.m.actual);
+    html += row; mxExp.push(exp);
+  }
+  html += `<tr class="total-row"><td class="rowhead">All outlets</td><td>${fmtMoney(G.daily)}</td>`+dayKeys.map((dk,i)=>mxCell(dayTotals[i], G.daily, 'All outlets '+fmtDayMon(parseYMD(dk)))).join('')+mxCell(G.actual, G.tdTarget, 'All outlets till '+tillLbl)+'</tr>';
+  html += '</tbody></table>';
+
   outEl.innerHTML = html;
   attachReportRowHandlers();
+  const rerender = ()=>renderReportsPage();
+  document.getElementById('tgt_month').addEventListener('change', (e)=>{ tgtState.month=e.target.value; tgtState.asOf=null; rerender(); });
+  document.getElementById('tgt_asof').addEventListener('change', (e)=>{ tgtState.asOf=e.target.value||null; rerender(); });
+  const rb = document.getElementById('tgt_asof_reset'); if(rb) rb.addEventListener('click', ()=>{ tgtState.asOf=null; rerender(); });
+  document.getElementById('tgt_dw_outlet').addEventListener('change', (e)=>{ tgtState.dwOutlet=e.target.value; tgtState.dwClass='__all'; rerender(); });
+  document.getElementById('tgt_dw_class').addEventListener('change', (e)=>{ tgtState.dwClass=e.target.value; rerender(); });
+  document.getElementById('tgt_mx_mode').addEventListener('change', (e)=>{ tgtState.matrixMode=e.target.value; rerender(); });
 
+  const scopeLbl = (tgtState.dwOutlet==='__all'?'All outlets':tgtState.dwOutlet)+(tgtState.dwClass==='__all'?'':' / '+tgtState.dwClass);
+  const mainColTypes = ['text','money','money','money','money','percent','money','percent','money','money','money','money','percent','text','text'];
   lastReportExport = {
-    headers: ['Outlet / Class','Target (AED)','Actual Sales (AED)','Achievement %','Variance to Target (AED)'],
-    rows: exportRows,
-    grandRow: ['Grand Total', grandTarget||null, grandActual, grandPct, grandTarget?grandTarget-grandActual:null],
-    colTypes: ['text','money','money','percent','money'],
+    headers: heads, rows: expRows,
+    grandRow: expRow('Grand Total', G),
+    colTypes: mainColTypes,
+    filename: 'target_vs_actual_'+month+'_till_'+(elapsed?fmtDate(asOf):'start'),
+    sheets: [
+      { name:'Outlet & Class', rows:[heads, ...expRows, expRow('Grand Total', G)], colTypes: mainColTypes },
+      { name:'Day-wise', rows:[['Scope: '+scopeLbl], dwHeads, ...dwExp], colTypes:['text','text','money','money','percent','money','money','money','percent','money','money','percent'], headerRows:2 },
+      { name:'Outlet x Day (AED)', rows:[['Outlet','Daily Target', ...dayKeys, 'Till date'], ...mxExp, ['All outlets', G.daily, ...dayTotals, G.actual]], colTypes:['text', ...Array(dayKeys.length+2).fill('money')] },
+    ],
   };
 }
 
@@ -2960,11 +3173,12 @@ function exportReportCSV(){
   if(!lastReportExport){ return; }
   const allRows = [lastReportExport.headers, ...lastReportExport.rows, ...(lastReportExport.grandRow&&lastReportExport.grandRow.length?[lastReportExport.grandRow]:[])];
   const csv = allRows.map(r=>r.map(c=>'"'+String(c===null||c===undefined?'':c).replace(/"/g,'""')+'"').join(',')).join('\n');
-  downloadCSV(csv, currentReport+'_report.csv');
+  downloadCSV(csv, (lastReportExport.filename||currentReport+'_report')+'.csv');
 }
 function exportReportXLSX(){
   if(!lastReportExport){ return; }
   const allRows = [lastReportExport.headers, ...lastReportExport.rows, ...(lastReportExport.grandRow&&lastReportExport.grandRow.length?[lastReportExport.grandRow]:[])];
+  if(lastReportExport.sheets){ downloadXLSXSheets(lastReportExport.sheets, (lastReportExport.filename||currentReport+'_report')+'.xlsx'); return; }
   downloadXLSX(allRows, currentReport+'_report.xlsx', 'Report', lastReportExport.colTypes);
 }
 
@@ -2986,54 +3200,88 @@ function switchTab(tabName){
 }
 
 /* ============================================================
-   SETTINGS — Assign Target (per outlet, per class)
+   SETTINGS — Monthly Targets (import the target workbook, or edit
+   per outlet / class / month by hand)
    ============================================================ */
 async function renderSettingsPage(){
   const outletSel = document.getElementById('settings_outlet');
+  const monthInp = document.getElementById('settings_month');
   if(!outletSel.dataset.loaded){
     const outlets = await API.distinct('outlet', {});
     outletSel.innerHTML = outlets.map(o=>`<option value="${escapeAttr(o)}">${escapeHtml(o)}</option>`).join('');
     outletSel.dataset.loaded = '1';
     outletSel.addEventListener('change', renderSettingsTargetsTable);
+    monthInp.addEventListener('change', renderSettingsTargetsTable);
+    document.getElementById('targetImportBtn').addEventListener('click', importTargetFile);
+    const { months, targets } = await API.getTargets();
+    const now = new Date();
+    monthInp.value = months[0] || (now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0'));
+    if(targets.length) outletSel.value = targets[0].outlet;
   }
   await renderSettingsTargetsTable();
 }
 
+async function importTargetFile(){
+  const input = document.getElementById('targetImportFile');
+  const out = document.getElementById('targetImportResult');
+  const file = input.files && input.files[0];
+  if(!file){ out.innerHTML = '<span style="color:var(--brick)">Choose the target Excel file first.</span>'; return; }
+  const btn = document.getElementById('targetImportBtn');
+  btn.disabled = true; out.innerHTML = 'Importing…';
+  try{
+    const r = await API.importTargets(file);
+    tgtCache = null;
+    let html = `<div style="color:var(--green);font-weight:600">✓ Imported ${r.rows} class targets for ${r.outlets.length} outlets — ${r.months.map(monthLabel).join(', ')}</div>
+      <div>Total sales target ${fmtMoney(r.salesTarget)} · profit target ${fmtMoney(r.profitTarget)}. This replaced any earlier targets for these outlets in ${r.months.map(monthLabel).join(', ')}.</div>`;
+    if(r.unmatchedOutlets.length) html += `<div style="color:var(--brick)">⚠ Outlet name not found in the sales data (imported as-is, will show 0 sales): ${r.unmatchedOutlets.map(escapeHtml).join(', ')}</div>`;
+    if(r.unmatchedClasses.length) html += `<div style="color:var(--brick)">⚠ Class name not found in the sales data (imported as-is, will show 0 sales): ${r.unmatchedClasses.map(escapeHtml).join('; ')}</div>`;
+    out.innerHTML = html;
+    input.value = '';
+    document.getElementById('settings_month').value = r.months[0];
+    await renderSettingsTargetsTable();
+  }catch(err){
+    out.innerHTML = `<span style="color:var(--brick)">${escapeHtml(err.message)}</span>`;
+  }finally{
+    btn.disabled = false;
+  }
+}
+
 async function renderSettingsTargetsTable(){
   const outlet = document.getElementById('settings_outlet').value;
+  const month = document.getElementById('settings_month').value;
   const wrap = document.getElementById('settingsTargetsWrap');
   if(!outlet){ wrap.innerHTML = '<p style="padding:20px;color:var(--text-dim)">No outlets found — load data first.</p>'; return; }
+  if(!month){ wrap.innerHTML = '<p style="padding:20px;color:var(--text-dim)">Pick a month.</p>'; return; }
   wrap.innerHTML = '<p style="padding:20px;color:var(--text-dim)">Loading…</p>';
 
-  const [classes, allTargets] = await Promise.all([
-    API.distinct('class_', { outlet }),
-    API.getTargets(),
-  ]);
-  const targetMap = new Map(allTargets.filter(t=>t.outlet===outlet).map(t=>[t.class_, t.target_amount]));
+  const [classes, tg] = await Promise.all([ API.distinct('class_', { outlet }), API.getTargets(month) ]);
+  const tmap = new Map(tg.month===month ? tg.targets.filter(t=>t.outlet===outlet).map(t=>[t.class_, t]) : []);
+  const all = [...new Set([...tmap.keys(), ...classes])];
+  all.sort((a,b)=> ((tmap.get(b)||{}).sales_target||0) - ((tmap.get(a)||{}).sales_target||0) || a.localeCompare(b));
+  let totS = 0, totP = 0;
+  for(const t of tmap.values()){ totS += t.sales_target; totP += t.profit_target; }
 
-  let html = `<table class="pivot"><thead><tr><th class="rowhead">Class</th><th>Target (AED)</th><th></th></tr></thead><tbody>`;
-  for(const c of classes){
-    const val = targetMap.has(c) ? targetMap.get(c) : '';
-    html += `<tr><td class="rowhead">${escapeHtml(c)}</td>
-      <td><input type="number" min="0" step="0.01" class="target-input" data-class="${escapeAttr(c)}" value="${val}"
-        style="width:160px;padding:6px 10px;border:1px solid var(--line);border-radius:2px;font-family:var(--sans);font-size:13px;"></td>
-      <td><span class="target-status" data-class="${escapeAttr(c)}" style="font-size:11px;"></span></td>
-    </tr>`;
+  const inp = (cls, field, val)=>`<input type="number" min="0" step="0.01" class="target-input" data-class="${escapeAttr(cls)}" data-field="${field}" value="${val||''}"
+        style="width:130px;padding:6px 10px;border:1px solid var(--line);border-radius:2px;font-family:var(--sans);font-size:13px;">`;
+  let html = `<table class="pivot"><thead><tr><th class="rowhead">Class</th><th>Sales Target (AED)</th><th>Profit Target (AED)</th><th class="rowhead">Staff</th><th class="rowhead">Supervisor</th><th></th></tr></thead><tbody>`;
+  for(const c of all){
+    const t = tmap.get(c) || {};
+    html += `<tr><td class="rowhead">${escapeHtml(c)}</td><td>${inp(c,'sales_target',t.sales_target)}</td><td>${inp(c,'profit_target',t.profit_target)}</td>
+      <td class="rowhead tgt-staff" title="${escapeAttr(t.staff||'')}">${escapeHtml(t.staff||'')}</td><td class="rowhead tgt-staff">${escapeHtml(t.supervisor||'')}</td>
+      <td><span class="target-status" data-class="${escapeAttr(c)}" style="font-size:11px;"></span></td></tr>`;
   }
+  html += `<tr class="total-row"><td class="rowhead">Total — ${escapeHtml(monthLabel(month))}</td><td id="set_tot_s">${fmtMoney(totS)}</td><td id="set_tot_p">${fmtMoney(totP)}</td><td></td><td></td><td></td></tr>`;
   html += '</tbody></table>';
-  if(classes.length===0) html = '<p style="padding:20px;color:var(--text-dim)">No classes found for this outlet.</p>';
   wrap.innerHTML = html;
-
   wrap.querySelectorAll('.target-input').forEach(input=>{
-    input.addEventListener('change', ()=>saveOneTarget(outlet, input));
+    input.addEventListener('change', ()=>saveOneTarget(month, outlet, input.dataset.class));
   });
 }
 
-async function saveOneTarget(outlet, input){
-  const cls = input.dataset.class;
+async function saveOneTarget(month, outlet, cls){
   const wrap = document.getElementById('settingsTargetsWrap');
+  const get = (f)=> wrap.querySelector(`.target-input[data-class="${CSS.escape(cls)}"][data-field="${f}"]`).value.trim();
   const statusEl = wrap.querySelector(`.target-status[data-class="${CSS.escape(cls)}"]`);
-  const raw = input.value.trim();
   const setStatus = (msg, color)=>{
     if(!statusEl) return;
     statusEl.textContent = msg; statusEl.style.color = color;
@@ -3041,15 +3289,15 @@ async function saveOneTarget(outlet, input){
     statusEl._t = setTimeout(()=>{ statusEl.textContent=''; }, 2500);
   };
   try{
-    if(raw===''){
-      await API.deleteTarget(outlet, cls);
-      setStatus('Cleared', 'var(--text-dim)');
-    } else {
-      const num = Number(raw);
-      if(!isFinite(num) || num<0) throw new Error('Enter a non-negative number');
-      await API.saveTarget(outlet, cls, num);
-      setStatus('Saved ✓', 'var(--green)');
-    }
+    const st = get('sales_target'), pt = get('profit_target');
+    const sn = st===''?0:Number(st), pn = pt===''?0:Number(pt);
+    if(!isFinite(sn)||!isFinite(pn)||sn<0||pn<0) throw new Error('Enter a non-negative number');
+    await API.saveTarget({ month, outlet, class_:cls, sales_target:sn, profit_target:pn });
+    tgtCache = null;
+    const tot = (f)=>[...wrap.querySelectorAll(`.target-input[data-field="${f}"]`)].reduce((a,i)=>a+(Number(i.value)||0),0);
+    document.getElementById('set_tot_s').textContent = fmtMoney(tot('sales_target'));
+    document.getElementById('set_tot_p').textContent = fmtMoney(tot('profit_target'));
+    setStatus(sn||pn ? 'Saved ✓' : 'Cleared', sn||pn ? 'var(--green)' : 'var(--text-dim)');
   }catch(err){
     setStatus('Error: '+err.message, 'var(--brick)');
   }
@@ -3059,6 +3307,7 @@ async function saveOneTarget(outlet, input){
    MASTER UPDATE
    ============================================================ */
 async function updateAll(){
+  tgtCache = null;
   const [grand] = await Promise.all([
     renderKPIs(),
     renderCharts(),

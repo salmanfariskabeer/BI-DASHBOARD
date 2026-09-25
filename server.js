@@ -157,10 +157,14 @@ async function ensureSchema() {
   await exec(`CREATE TABLE IF NOT EXISTS sales_history (${TABLE_SCHEMA_SQL})`);
   await exec(`CREATE TABLE IF NOT EXISTS sales_current (${TABLE_SCHEMA_SQL})`);
   await exec(`CREATE OR REPLACE VIEW sales AS SELECT * FROM sales_history UNION ALL SELECT * FROM sales_current`);
-  // Sales targets, set per (outlet, class) in the Settings page and read by
-  // the Target report. One row per outlet+class combination that has a
-  // target assigned — a combination with no row simply has no target set.
-  await exec(`CREATE TABLE IF NOT EXISTS targets (outlet VARCHAR, class_ VARCHAR, target_amount DOUBLE, updated_at TIMESTAMP)`);
+  // Monthly sales/profit targets per (month, outlet, class), imported from
+  // the "Sales Target Report" workbook or edited in Settings, read by the
+  // Target report. class_ is the dashboard's own class name (SubGroup);
+  // source_class keeps the name exactly as it appeared in the workbook.
+  // (The old month-less `targets` table is left untouched and unused.)
+  await exec(`CREATE TABLE IF NOT EXISTS monthly_targets (
+    month VARCHAR, outlet VARCHAR, class_ VARCHAR, sales_target DOUBLE, profit_target DOUBLE,
+    staff VARCHAR, supervisor VARCHAR, source_class VARCHAR, updated_at TIMESTAMP)`);
 }
 
 /* ============================================================
@@ -291,41 +295,189 @@ app.post('/api/distinct', async (req, res) => {
   }
 });
 
-/*
-  Sales targets — set per (outlet, class) in Settings, read by the Target
-  report. Small table (a few dozen rows at most: outlets x classes), so a
-  plain "list everything" GET plus delete-then-insert upsert is plenty.
-*/
+/* ============================================================
+   MONTHLY TARGETS
+   ============================================================ */
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+// The target workbook spells some classes differently from the sales data
+// (SubGroup). Explicit aliases first, then a punctuation/&-insensitive match.
+const CLASS_ALIASES = {
+  'CHILLED & DAIRY': 'CHILLED AND DAIRY',
+  'HEALTH & BEAUTY': 'HEALTH AND BEAUTY',
+  'FRUITS & VEGETABLES': 'FRUITS&VEGETABLE',
+  'FISH & SEA FOOD': 'FISH',
+  'HOME APPLIANCES': 'HOME APPLIANCE ITEMS',
+  'FOOTWEAR': 'FOOT WEAR',
+  'WATCHES & ACCESSORIES': 'WATCH & ACCESSORIES',
+  'TOBACCO & ACCESSORIES': 'TOBACCO&ACC',
+  'TOYS & SPORTS': 'TOYS  & SPORTS',
+  'JEWELLERY & ACCESSORIES': 'JEWELLERIES & ACCESSORIES',
+};
+const normName = (s) => String(s || '').toUpperCase().replace(/&/g, ' AND ').replace(/[^A-Z0-9]/g, '');
+
+function makeMatcher(known) {
+  const exact = new Set(known);
+  const byNorm = new Map(known.map((k) => [normName(k), k]));
+  return (name) => {
+    const n = String(name || '').trim();
+    if (exact.has(n)) return n;
+    const alias = CLASS_ALIASES[n.toUpperCase().replace(/\s+/g, ' ')];
+    if (alias && exact.has(alias)) return alias;
+    return byNorm.get(normName(alias || n)) || null;
+  };
+}
+
+async function distinctValues(dim) {
+  const rows = await run(`SELECT DISTINCT ${dimExpr(dim)} AS v FROM sales`);
+  return rows.map((r) => r.v).filter(Boolean);
+}
+
+// Parses the "Sales Target Report" workbook: one sheet per outlet, title in
+// A1 ("Sales Target Report – <OUTLET> – YYYY-MM"), a header row containing
+// "Class Name", then one row per class until the TOTAL rows.
+function parseTargetWorkbook(filePath, fallbackMonth) {
+  const wb = XLSX.readFile(filePath);
+  const sheets = [];
+  for (const name of wb.SheetNames) {
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null, raw: true });
+    const headerIdx = aoa.findIndex((r) => r && r.some((c) => String(c || '').trim().toLowerCase() === 'class name'));
+    if (headerIdx < 0) continue;
+    const title = String((aoa[0] && aoa[0][0]) || '');
+    const m = title.match(/^\s*Sales Target Report\s*\S\s*(.+?)\s*\S\s*(\d{4}-\d{2})\s*$/i);
+    const outlet = m ? m[1].trim() : name.trim();
+    const month = m ? m[2] : fallbackMonth;
+    const hdr = aoa[headerIdx].map((c) => String(c || '').trim().toLowerCase());
+    const col = (label) => hdr.indexOf(label);
+    const ci = { cls: col('class name'), staff: col('staff name'), sup: col('supervisor'), st: col('sales target'), pt: col('profit target') };
+    if (ci.st < 0) continue;
+    const rows = [];
+    for (const r of aoa.slice(headerIdx + 1)) {
+      const cls = r && r[ci.cls] != null ? String(r[ci.cls]).trim() : '';
+      if (!cls) continue;
+      if (/^(TOTAL TARGET|ASSIGNED TARGET|BALANCE TO ASSIGN)/i.test(cls)) break;
+      const st = Number(r[ci.st]) || 0, pt = ci.pt >= 0 ? Number(r[ci.pt]) || 0 : 0;
+      if (st === 0 && pt === 0) continue;
+      rows.push({
+        cls, sales_target: Math.round(st * 100) / 100, profit_target: Math.round(pt * 100) / 100,
+        staff: ci.staff >= 0 && r[ci.staff] ? String(r[ci.staff]).trim() : '',
+        supervisor: ci.sup >= 0 && r[ci.sup] ? String(r[ci.sup]).trim() : '',
+      });
+    }
+    sheets.push({ sheet: name, outlet, month, rows });
+  }
+  return sheets;
+}
+
 app.get('/api/targets', async (req, res) => {
   try {
-    const rows = await run(`SELECT outlet, class_, target_amount::DOUBLE AS target_amount FROM targets ORDER BY outlet, class_`);
-    res.json({ targets: rows });
+    const months = (await run(`SELECT DISTINCT month FROM monthly_targets ORDER BY month DESC`)).map((r) => r.month);
+    const month = MONTH_RE.test(req.query.month || '') ? req.query.month : months[0];
+    const targets = month ? await run(`
+      SELECT month, outlet, class_, sales_target::DOUBLE AS sales_target, profit_target::DOUBLE AS profit_target,
+             staff, supervisor, source_class
+      FROM monthly_targets WHERE month = ${esc(month)} ORDER BY outlet, sales_target DESC`) : [];
+    res.json({ months, month: month || null, targets });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// Manual edit from Settings. Zero/blank for both targets = remove the row.
 app.post('/api/targets', async (req, res) => {
   try {
-    const { outlet, class_, target } = req.body || {};
-    if (!outlet || typeof outlet !== 'string') return res.status(400).json({ error: 'outlet is required' });
-    if (!class_ || typeof class_ !== 'string') return res.status(400).json({ error: 'class_ is required' });
-    const num = Number(target);
-    if (!isFinite(num) || num < 0) return res.status(400).json({ error: 'target must be a non-negative number' });
-    await exec(`DELETE FROM targets WHERE outlet = ${esc(outlet)} AND class_ = ${esc(class_)}`);
-    await exec(`INSERT INTO targets VALUES (${esc(outlet)}, ${esc(class_)}, ${num}, now())`);
+    const { month, outlet, class_ } = req.body || {};
+    if (!MONTH_RE.test(month || '')) return res.status(400).json({ error: 'month (YYYY-MM) is required' });
+    if (!outlet || !class_) return res.status(400).json({ error: 'outlet and class_ are required' });
+    const st = Number(req.body.sales_target || 0), pt = Number(req.body.profit_target || 0);
+    if (!isFinite(st) || !isFinite(pt) || st < 0 || pt < 0) return res.status(400).json({ error: 'targets must be non-negative numbers' });
+    const where = `month = ${esc(month)} AND outlet = ${esc(outlet)} AND class_ = ${esc(class_)}`;
+    const [prev] = await run(`SELECT staff, supervisor, source_class FROM monthly_targets WHERE ${where}`);
+    await exec(`DELETE FROM monthly_targets WHERE ${where}`);
+    if (st > 0 || pt > 0) {
+      await exec(`INSERT INTO monthly_targets VALUES (${esc(month)}, ${esc(outlet)}, ${esc(class_)}, ${st}, ${pt},
+        ${esc((prev && prev.staff) || '')}, ${esc((prev && prev.supervisor) || '')}, ${esc((prev && prev.source_class) || class_)}, now())`);
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.delete('/api/targets', async (req, res) => {
+// Import the monthly target workbook. Replaces that month's targets for
+// every outlet present in the file; other months/outlets are untouched.
+// ?dryRun=1 only reports what would be imported.
+app.post('/api/targets/import', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded (expected multipart field "file")' });
   try {
-    const { outlet, class_ } = req.body || {};
-    if (!outlet || !class_) return res.status(400).json({ error: 'outlet and class_ are required' });
-    await exec(`DELETE FROM targets WHERE outlet = ${esc(outlet)} AND class_ = ${esc(class_)}`);
-    res.json({ ok: true });
+    const nameMonth = (req.file.originalname.match(/(\d{4}-\d{2})/) || [])[1];
+    const sheets = parseTargetWorkbook(req.file.path, MONTH_RE.test((req.body && req.body.month) || '') ? req.body.month : nameMonth);
+    if (!sheets.length) return res.status(400).json({ error: 'No target sheets found (expected a "Class Name" header row with a "Sales Target" column).' });
+    const badMonth = sheets.find((s) => !MONTH_RE.test(s.month || ''));
+    if (badMonth) return res.status(400).json({ error: `Could not tell which month sheet "${badMonth.sheet}" is for.` });
+
+    const matchOutlet = makeMatcher(await distinctValues('outlet'));
+    const matchClass = makeMatcher(await distinctValues('class_'));
+    const summary = { months: [...new Set(sheets.map((s) => s.month))], outlets: [], unmatchedOutlets: [], unmatchedClasses: [], rows: 0, salesTarget: 0, profitTarget: 0 };
+    const inserts = [];
+    for (const s of sheets) {
+      const outlet = matchOutlet(s.outlet);
+      if (!outlet) summary.unmatchedOutlets.push(s.outlet);
+      const o = outlet || s.outlet;
+      const merged = new Map(); // two workbook classes mapping to one data class get summed
+      for (const r of s.rows) {
+        const cls = matchClass(r.cls);
+        if (!cls) summary.unmatchedClasses.push(`${o}: ${r.cls}`);
+        const k = cls || r.cls;
+        const m = merged.get(k);
+        if (m) { m.sales_target += r.sales_target; m.profit_target += r.profit_target; m.source_class += ' + ' + r.cls; }
+        else merged.set(k, { ...r, class_: k, source_class: r.cls });
+      }
+      let st = 0, pt = 0;
+      for (const r of merged.values()) {
+        inserts.push(`(${esc(s.month)}, ${esc(o)}, ${esc(r.class_)}, ${r.sales_target}, ${r.profit_target}, ${esc(r.staff)}, ${esc(r.supervisor)}, ${esc(r.source_class)}, now())`);
+        st += r.sales_target; pt += r.profit_target;
+      }
+      summary.outlets.push({ outlet: o, month: s.month, classes: merged.size, salesTarget: st, profitTarget: pt });
+      summary.rows += merged.size; summary.salesTarget += st; summary.profitTarget += pt;
+    }
+    if (req.query.dryRun !== '1') {
+      await exec('BEGIN TRANSACTION');
+      try {
+        for (const o of summary.outlets) {
+          await exec(`DELETE FROM monthly_targets WHERE month = ${esc(o.month)} AND outlet = ${esc(o.outlet)}`);
+        }
+        if (inserts.length) await exec(`INSERT INTO monthly_targets VALUES ${inserts.join(',\n')}`);
+        await exec('COMMIT');
+      } catch (e) {
+        await exec('ROLLBACK').catch(() => {});
+        throw e;
+      }
+    }
+    res.json({ ok: true, dryRun: req.query.dryRun === '1', ...summary });
+  } catch (err) {
+    console.error('Target import error:', err);
+    res.status(400).json({ error: 'Import failed: ' + err.message });
+  } finally {
+    fs.unlink(req.file.path, () => {});
+  }
+});
+
+// Actual sales + cost per outlet x class x day for a date range -- the one
+// query behind the whole Target report (at most ~outlets x classes x 31 rows).
+app.get('/api/target-actuals', async (req, res) => {
+  try {
+    const from = req.query.from, to = req.query.to;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(to || '')) {
+      return res.status(400).json({ error: 'from and to (YYYY-MM-DD) are required' });
+    }
+    const rows = await run(`
+      SELECT ${dimExpr('outlet')} AS outlet, ${dimExpr('class_')} AS class_, strftime(trandate, '%Y-%m-%d') AS day,
+             SUM(SalesTotal)::DOUBLE AS sales, SUM(TotalCost)::DOUBLE AS cost
+      FROM sales
+      WHERE trandate >= ${esc(from)}::DATE AND trandate <= ${esc(to)}::DATE
+      GROUP BY 1, 2, 3`);
+    res.json({ rows });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
