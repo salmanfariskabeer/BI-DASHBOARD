@@ -556,6 +556,13 @@ table.tgt-matrix td.ach-good{ background:rgba(31,92,77,0.12); }
 table.tgt-matrix td.ach-warn{ background:rgba(183,121,31,0.14); }
 table.tgt-matrix td.ach-bad{ background:rgba(143,51,43,0.10); }
 .mx-wd{ font-size:9px; opacity:0.75; font-weight:400; }
+/* Wide tables scroll sideways on their own, so the cards/headings above stay put */
+#reportOutput .tbl-scroll{ overflow-x:auto; margin:0 18px 18px; }
+#reportOutput .tbl-scroll table.pivot{ margin:0; width:100%; }
+#reportOutput .tbl-scroll table.pivot th:first-child, #reportOutput .tbl-scroll table.pivot td:first-child{ position:sticky; left:0; z-index:1; }
+#reportOutput .tbl-scroll table.pivot td:first-child{ background:#fff; }
+#reportOutput .tbl-scroll table.pivot tr.level-0 td:first-child{ background:#EEF0F3; }
+#reportOutput .tbl-scroll table.pivot tr.total-row td:first-child{ background:var(--paper-2); }
 #reportOutput table.pivot{ margin:0 18px 18px; width:calc(100% - 36px); }
 #reportOutput{ padding-bottom:6px; overflow-x:auto; }
 /* Matches the specificity of the level-N border-left rules above (table.pivot
@@ -3096,7 +3103,7 @@ async function renderTargetReport(outEl, myGen){
   const heads = ['Outlet / Class','Month Target','Daily Target','Target till '+tillLbl,'Actual till '+tillLbl,'Ach %','Variance','Month Ach %','Balance to Achieve',`Req./Day (${remaining}d left)`,'Profit Tgt till '+tillLbl,'Actual GP','GP Ach %','Staff','Supervisor'];
   const numCells = (m)=> `<td>${fmtMoney(m.st)}</td><td>${fmtMoney(m.daily)}</td><td>${fmtMoney(m.tdTarget)}</td><td><b>${fmtMoney(m.actual)}</b></td>${achTd(m.ach)}${varTd(m.variance)}<td>${fmtPct(m.monthAch)}</td><td>${fmtMoney(Math.max(m.balance,0))}</td><td>${m.reqPerDay!=null?fmtMoney(m.reqPerDay):'—'}</td><td>${fmtMoney(m.tdProfit)}</td><td>${fmtMoney(m.gp)}</td>${achTd(m.gpAch)}`;
   html += '<div class="report-subtitle">Outlet &amp; class — target vs actual till '+tillLbl+'</div>';
-  html += '<table class="pivot tgt-table"><thead><tr>'+heads.map((h,i)=>`<th${i===0||i>=13?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
+  html += '<div class="tbl-scroll"><table class="pivot tgt-table"><thead><tr>'+heads.map((h,i)=>`<th${i===0||i>=13?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
   const expRows = [];
   const expRow = (label, m, staff, sup)=>[label, m.st, m.daily, m.tdTarget, m.actual, nz(m.ach), m.variance, nz(m.monthAch), Math.max(m.balance,0), m.reqPerDay, m.tdProfit, m.gp, nz(m.gpAch), staff||'', sup||''];
   for(const o of outlets){
@@ -3116,7 +3123,7 @@ async function renderTargetReport(outEl, myGen){
     if(o.other) expRows.push(['   Other sales (no target, not counted)', null, null, null, o.other, null, null, null, null, null, null, null, null, '', '']);
   }
   html += `<tr class="total-row"><td class="rowhead">Grand Total</td>${numCells(G)}<td></td><td></td></tr>`;
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
   html += `<p class="report-legend"><span class="legend-dot above"></span> At/above 100% &nbsp; <span class="legend-dot warn"></span> 90–99% &nbsp; <span class="legend-dot below"></span> Below 90% — of the target till ${tillLbl}. Click ▸ for the class breakdown with staff and supervisor.</p>`;
   if(gOther) html += `<p class="pivot-note">Other sales in classes that have no target (e.g. shop consumption): ${fmtMoney(gOther)} — shown per outlet, not counted in achievement.</p>`;
   if(withoutTarget.length) html += `<p class="pivot-note">Outlets with sales but no target this month (not shown): ${withoutTarget.map(escapeHtml).join(', ')}.</p>`;
@@ -3136,7 +3143,7 @@ async function renderTargetReport(outEl, myGen){
     <div class="filter-group"><label>Class</label><select id="tgt_dw_class"><option value="__all">All target classes</option>${classOpts.map(c=>`<option value="${escapeAttr(c)}"${c===tgtState.dwClass?' selected':''}>${escapeHtml(c)}</option>`).join('')}</select></div>
   </div>`;
   const dwHeads = ['Date','Day','Daily Target','Actual','Ach %','Variance','Cum. Target','Cum. Actual','Cum. Ach %','Daily Profit Tgt','Actual GP','GP Ach %'];
-  html += '<table class="pivot tgt-table"><thead><tr>'+dwHeads.map((h,i)=>`<th${i<2?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
+  html += '<div class="tbl-scroll"><table class="pivot tgt-table"><thead><tr>'+dwHeads.map((h,i)=>`<th${i<2?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
   const dwExp = [];
   let cumT=0, cumA=0, cumGP=0;
   for(const day of dayKeys){
@@ -3150,14 +3157,14 @@ async function renderTargetReport(outEl, myGen){
   }
   const tdT = dT*elapsed, tdP = dP*elapsed;
   html += `<tr class="total-row"><td class="rowhead">Till ${tillLbl}</td><td class="rowhead">${elapsed} days</td><td>${fmtMoney(tdT)}</td><td>${fmtMoney(cumA)}</td>${achTd(tdT>0?cumA/tdT:null)}${varTd(cumA-tdT)}<td>${fmtMoney(cumT)}</td><td>${fmtMoney(cumA)}</td>${achTd(cumT>0?cumA/cumT:null)}<td>${fmtMoney(tdP)}</td><td>${fmtMoney(cumGP)}</td>${achTd(tdP>0?cumGP/tdP:null)}</tr>`;
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
   const pBal = Math.max(pST-cumA,0);
   html += `<p class="pivot-note">Month target for this selection: ${fmtMoney(pST)} · achieved ${fmtPct(pST?cumA/pST:null)} · balance ${fmtMoney(pBal)}${remaining>0?` · needs ${fmtMoney(pBal/remaining)} per day for the remaining ${remaining} days`:''}.</p>`;
 
   // 7. Outlet x day matrix.
   html += '<div class="report-subtitle">Outlet × day — each day\'s sales vs that outlet\'s daily target</div>';
   html += `<div class="pivot-controls tgt-controls"><div class="filter-group"><label>Show</label><select id="tgt_mx_mode"><option value="pct"${tgtState.matrixMode==='pct'?' selected':''}>Achievement %</option><option value="amt"${tgtState.matrixMode==='amt'?' selected':''}>Actual sales (AED)</option></select></div></div>`;
-  html += '<table class="pivot tgt-matrix"><thead><tr><th class="rowhead">Outlet</th><th>Daily Tgt</th>'+dayKeys.map(dk=>{ const d=parseYMD(dk); return `<th title="${WEEKDAYS[d.getDay()]} ${fmtDayMon(d)}">${d.getDate()}<br><span class="mx-wd">${WEEKDAYS[d.getDay()].slice(0,2)}</span></th>`; }).join('')+'<th>Till date</th></tr></thead><tbody>';
+  html += '<div class="tbl-scroll"><table class="pivot tgt-matrix"><thead><tr><th class="rowhead">Outlet</th><th>Daily Tgt</th>'+dayKeys.map(dk=>{ const d=parseYMD(dk); return `<th title="${WEEKDAYS[d.getDay()]} ${fmtDayMon(d)}">${d.getDate()}<br><span class="mx-wd">${WEEKDAYS[d.getDay()].slice(0,2)}</span></th>`; }).join('')+'<th>Till date</th></tr></thead><tbody>';
   const mxExp = [];
   const mxCell = (actual, target, title)=>{
     const p = target>0 ? actual/target : null;
@@ -3179,7 +3186,7 @@ async function renderTargetReport(outEl, myGen){
     html += row; mxExp.push(exp);
   }
   html += `<tr class="total-row"><td class="rowhead">All outlets</td><td>${fmtMoney(G.daily)}</td>`+dayKeys.map((dk,i)=>mxCell(dayTotals[i], G.daily, 'All outlets '+fmtDayMon(parseYMD(dk)))).join('')+mxCell(G.actual, G.tdTarget, 'All outlets till '+tillLbl)+'</tr>';
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
 
   outEl.innerHTML = html;
   attachReportRowHandlers();
