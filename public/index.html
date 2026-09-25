@@ -1143,10 +1143,35 @@ const API = {
   }
 };
 
+// The build id the page was loaded with. If the server reports a different
+// one, a new version was deployed while this page/app stayed open: reload
+// right away if the user isn't looking, otherwise offer a one-click reload.
+let loadedBuild = null;
+function checkForNewVersion(status, reloadNow){
+  if(!status || !status.build) return;
+  if(!loadedBuild){ loadedBuild = status.build; return; }
+  if(status.build === loadedBuild) return;
+  if(reloadNow || document.visibilityState === 'hidden'){ location.reload(); return; }
+  if(document.getElementById('newVersionBar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'newVersionBar';
+  bar.innerHTML = 'A new version of the dashboard is available. <button>Reload now</button>';
+  bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:9999;background:#14213D;color:#fff;padding:10px 16px;border-radius:4px;box-shadow:0 4px 14px rgba(0,0,0,.3);font-size:13px;';
+  bar.querySelector('button').style.cssText = 'margin-left:10px;background:#A9812F;color:#fff;border:0;padding:6px 12px;border-radius:3px;cursor:pointer;font-weight:600;';
+  bar.querySelector('button').addEventListener('click', ()=>location.reload());
+  document.body.appendChild(bar);
+}
 async function refreshServerStatus(){
   serverStatus = await API.status();
+  checkForNewVersion(serverStatus);
   return serverStatus;
 }
+// Check when the app is brought back to the front, and every 10 minutes.
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible') API.status().then(st=>checkForNewVersion(st, true)).catch(()=>{});
+});
+setInterval(()=>{ API.status().then(checkForNewVersion).catch(()=>{}); }, 10*60*1000);
+window.addEventListener('focus', ()=>{ API.status().then(checkForNewVersion).catch(()=>{}); });
 // The global filter bar, in the shape every /api/* call expects.
 function baseFilters(){
   return {

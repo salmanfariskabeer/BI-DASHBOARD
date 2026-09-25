@@ -23,6 +23,9 @@ const path = require('path');
 const { ingestCsvInto, TABLE_SCHEMA_SQL } = require('./ingest');
 
 const PORT = process.env.PORT || 3000;
+// Changes on every deploy; the page compares it to spot that it's running an
+// old copy (e.g. an installed app left open) and reloads itself.
+const BUILD_ID = process.env.RAILWAY_DEPLOYMENT_ID || String(Date.now());
 const API_KEY = process.env.API_KEY || '';
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '13661366';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -268,6 +271,7 @@ app.get('/api/status', async (req, res) => {
     let lastUpload = {};
     try { lastUpload = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'last_upload.json'), 'utf8')); } catch (e) {}
     res.json({
+      build: BUILD_ID,
       loaded: Number(row.n) > 0,
       rows: Number(row.n),
       dateMin: row.dmin ? new Date(row.dmin).toISOString().slice(0, 10) : null,
@@ -543,8 +547,11 @@ app.post('/api/aggregate', async (req, res) => {
   }
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+// HTML must always be re-checked, so a deploy is picked up on the next load.
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => { if (filePath.endsWith('.html')) res.set('Cache-Control', 'no-cache'); },
+}));
+app.get('/', (req, res) => { res.set('Cache-Control', 'no-cache'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
 
 ensureSchema()
   .then(() => {

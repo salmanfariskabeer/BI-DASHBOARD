@@ -6,7 +6,7 @@
 // flaky connection doesn't leave the app fully blank, but a fresh deploy is
 // still what loads whenever the network is actually up.
 
-const CACHE_NAME = 'madina-bi-shell-v3';
+const CACHE_NAME = 'madina-bi-shell-v4';
 const SHELL_URLS = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -39,7 +39,7 @@ self.addEventListener('fetch', (event) => {
   // Static shell: try the network first (so an update is picked up as soon
   // as it's reachable), fall back to the cache only if the network fails.
   event.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' })
       .then((res) => {
         if (!res.ok) return res; // never cache a 401 / error page
         const copy = res.clone();
