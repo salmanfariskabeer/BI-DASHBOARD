@@ -129,7 +129,7 @@ body{min-height:100vh;}
 }
 .filter-group select:focus, .filter-group input:focus{outline:2px solid var(--brass); outline-offset:1px;}
 
-/* ---------- Outlet multi-select (tick which outlets to include) ---------- */
+/* ---------- Tick-box filters (Outlet / Category / Class / Supplier) ---------- */
 .multiselect{position:relative;}
 .multiselect-btn{
   border:1px solid var(--line); background:var(--paper); padding:6px 10px;
@@ -159,6 +159,12 @@ body{min-height:100vh;}
 }
 .multiselect-item:hover{background:var(--paper);}
 .multiselect-item input{margin:0; flex:none;}
+.multiselect-item span{ white-space:normal; line-height:1.3; }
+.multiselect-search{ display:block; width:calc(100% - 16px); margin:8px 8px 0; padding:6px 8px; font-size:12.5px;
+  border:1px solid var(--line); border-radius:2px; font-family:var(--sans); box-sizing:border-box; }
+.multiselect-search:focus{ outline:2px solid var(--brass); outline-offset:0; }
+.multiselect-btn{ max-width:260px; overflow:hidden; text-overflow:ellipsis; }
+#f_supplier_panel, #f_class__panel{ min-width:280px; max-width:380px; }
 
 .reset-btn{
   border:1px solid var(--brick);
@@ -722,6 +728,7 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
           <div class="multiselect" id="f_outlet_wrap">
             <button type="button" class="multiselect-btn" id="f_outlet_btn">All Outlets</button>
             <div class="multiselect-panel hidden" id="f_outlet_panel">
+              <input type="search" class="multiselect-search" id="f_outlet_search" placeholder="Search outlets…" autocomplete="off">
               <div class="multiselect-actions">
                 <button type="button" id="f_outlet_all">All</button>
                 <button type="button" id="f_outlet_none">None</button>
@@ -730,9 +737,45 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
             </div>
           </div>
         </div>
-        <div class="filter-group"><label>Category</label><select id="f_category"></select></div>
-        <div class="filter-group"><label>Class</label><select id="f_class"></select></div>
-        <div class="filter-group"><label>Supplier</label><select id="f_supplier"></select></div>
+        <div class="filter-group"><label>Category</label>
+          <div class="multiselect" id="f_category_wrap">
+            <button type="button" class="multiselect-btn" id="f_category_btn">All Categories</button>
+            <div class="multiselect-panel hidden" id="f_category_panel">
+              <input type="search" class="multiselect-search" id="f_category_search" placeholder="Search categories…" autocomplete="off">
+              <div class="multiselect-actions">
+                <button type="button" id="f_category_all">All</button>
+                <button type="button" id="f_category_none">None</button>
+              </div>
+              <div class="multiselect-list" id="f_category_list"></div>
+            </div>
+          </div>
+        </div>
+        <div class="filter-group"><label>Class</label>
+          <div class="multiselect" id="f_class__wrap">
+            <button type="button" class="multiselect-btn" id="f_class__btn">All Classes</button>
+            <div class="multiselect-panel hidden" id="f_class__panel">
+              <input type="search" class="multiselect-search" id="f_class__search" placeholder="Search classes…" autocomplete="off">
+              <div class="multiselect-actions">
+                <button type="button" id="f_class__all">All</button>
+                <button type="button" id="f_class__none">None</button>
+              </div>
+              <div class="multiselect-list" id="f_class__list"></div>
+            </div>
+          </div>
+        </div>
+        <div class="filter-group"><label>Supplier</label>
+          <div class="multiselect" id="f_supplier_wrap">
+            <button type="button" class="multiselect-btn" id="f_supplier_btn">All Suppliers</button>
+            <div class="multiselect-panel hidden" id="f_supplier_panel">
+              <input type="search" class="multiselect-search" id="f_supplier_search" placeholder="Search suppliers…" autocomplete="off">
+              <div class="multiselect-actions">
+                <button type="button" id="f_supplier_all">All</button>
+                <button type="button" id="f_supplier_none">None</button>
+              </div>
+              <div class="multiselect-list" id="f_supplier_list"></div>
+            </div>
+          </div>
+        </div>
         <div class="filter-group"><label>Date From</label><input type="date" id="dateFrom"></div>
         <div class="filter-group"><label>Date To</label><input type="date" id="dateTo"></div>
         <button class="reset-btn" id="resetFiltersBtn">Reset filters</button>
@@ -1330,110 +1373,130 @@ async function afterDataLoaded(){
    ============================================================ */
 async function populateFilterOptions(){
   const outletVals = await API.distinct('outlet', {});
-  renderOutletMultiSelect(outletVals);
+  renderMultiSelect('outlet', outletVals);
   await populateCascadingFilters();
 }
 
-// Category/Class/Supplier dropdowns cascade off the current outlet
-// selection. Split out from populateFilterOptions() specifically so
-// toggling outlet checkboxes never re-fetches/re-renders the outlet list
-// itself mid-interaction — rebuilding those checkboxes out from under an
-// in-progress click was a real race (rapid toggles could silently lose
-// clicks, or leave the filter not actually applied).
+// Category/Class/Supplier lists cascade off the current outlet (and, for
+// Class, category) selection. Split out from populateFilterOptions() so
+// ticking outlets never rebuilds the outlet list itself mid-interaction.
 async function populateCascadingFilters(){
-  const catSel = document.getElementById('f_category');
-  const classSel = document.getElementById('f_class');
-  const supSel = document.getElementById('f_supplier');
-
   const outletOnly = filters.outlet!=='All' ? {outlet:filters.outlet} : {};
-  const catVals = await API.distinct('category', outletOnly);
-  fillSelect(catSel, ['All', ...catVals], filters.category);
-
+  const [catVals, supVals] = await Promise.all([
+    API.distinct('category', outletOnly),
+    API.distinct('supplier', outletOnly),
+  ]);
+  renderMultiSelect('category', catVals);
+  renderMultiSelect('supplier', supVals);
   const outletCat = { ...outletOnly, ...(filters.category!=='All' ? {category:filters.category} : {}) };
-  const classVals = await API.distinct('class_', outletCat);
-  fillSelect(classSel, ['All', ...classVals], filters.class_);
-
-  const supVals = await API.distinct('supplier', outletOnly);
-  fillSelect(supSel, ['All', ...supVals], filters.supplier);
+  renderMultiSelect('class_', await API.distinct('class_', outletCat));
 }
-function fillSelect(sel, values, current){
-  sel.innerHTML = '';
-  for(const v of values){
-    const opt = document.createElement('option');
-    opt.value = v; opt.textContent = v;
-    if(v===current) opt.selected = true;
-    sel.appendChild(opt);
+
+/* ---------- Tick-box filters (Outlet, Category, Class, Supplier) ----------
+   filters[key] is either the string 'All' (no filter -- the default, and
+   what "everything ticked" collapses back to) or an array of the ticked
+   values. An empty array means "none ticked" and deliberately shows zero
+   rows rather than silently falling back to All. Each list has a search
+   box (Supplier alone has 2,000+ values); All / None act on the values
+   currently shown by the search. */
+const MS_DIMS = {
+  outlet:   { plural:'Outlets',    dependents:true },
+  category: { plural:'Categories', dependents:true },
+  class_:   { plural:'Classes',    dependents:false },
+  supplier: { plural:'Suppliers',  dependents:false },
+};
+const msOptions = {};
+const msEl = (key, part)=> document.getElementById(`f_${key}_${part}`);
+
+function msLabel(key){
+  const v = filters[key], plural = MS_DIMS[key].plural;
+  if(v==='All') return 'All '+plural;
+  if(!Array.isArray(v) || v.length===0) return 'No '+plural+' Selected';
+  if(v.length===1) return v[0];
+  return v.length+' '+plural+' Selected';
+}
+
+function renderMultiSelect(key, values){
+  msOptions[key] = values;
+  // A cascade can remove values that were ticked (e.g. classes outside a
+  // newly picked category): keep only what still exists; if nothing
+  // survives, fall back to All instead of an unexplained empty dashboard.
+  if(Array.isArray(filters[key]) && filters[key].length){
+    const avail = new Set(values);
+    const kept = filters[key].filter(v=>avail.has(v));
+    filters[key] = (kept.length===0 || kept.length===values.length) ? 'All' : kept;
   }
-  if(!values.includes(current)) sel.value = 'All';
-}
-
-/* ---------- Outlet multi-select ("tick which outlets to include") ----------
-   filters.outlet is either the string 'All' (no filter — the default, and
-   what "every outlet ticked" collapses back to) or an array of the
-   currently-ticked outlet names. An empty array means "none ticked" and
-   deliberately shows zero rows, rather than silently falling back to All —
-   that's the one state a tick-list has to represent honestly. */
-function outletButtonLabel(allOutlets){
-  if(filters.outlet==='All') return 'All Outlets';
-  if(!Array.isArray(filters.outlet) || filters.outlet.length===0) return 'No Outlets Selected';
-  if(filters.outlet.length===allOutlets.length) return 'All Outlets';
-  if(filters.outlet.length===1) return filters.outlet[0];
-  return filters.outlet.length+' Outlets Selected';
-}
-
-function renderOutletMultiSelect(allOutlets){
-  const btn = document.getElementById('f_outlet_btn');
-  const list = document.getElementById('f_outlet_list');
-  const checkedSet = filters.outlet==='All' ? new Set(allOutlets) : new Set(filters.outlet);
-  list.innerHTML = allOutlets.map(o=>`
+  const checkedSet = filters[key]==='All' ? new Set(values) : new Set(filters[key]);
+  msEl(key,'list').innerHTML = values.map(v=>`
     <label class="multiselect-item">
-      <input type="checkbox" value="${escapeAttr(o)}" ${checkedSet.has(o)?'checked':''}>
-      ${escapeHtml(o)}
-    </label>`).join('') || '<div class="multiselect-item" style="color:var(--text-dim);cursor:default;">No outlets found</div>';
-  btn.textContent = outletButtonLabel(allOutlets);
-  list.querySelectorAll('input[type=checkbox]').forEach(cb=>{
-    cb.addEventListener('change', ()=>onOutletSelectionChange(allOutlets));
+      <input type="checkbox" value="${escapeAttr(v)}" ${checkedSet.has(v)?'checked':''}>
+      <span>${escapeHtml(v)}</span>
+    </label>`).join('') || `<div class="multiselect-item" style="color:var(--text-dim);cursor:default;">Nothing found</div>`;
+  applyMultiSelectSearch(key);
+  msEl(key,'btn').textContent = msLabel(key);
+}
+
+function applyMultiSelectSearch(key){
+  const q = (msEl(key,'search').value || '').trim().toLowerCase();
+  msEl(key,'list').querySelectorAll('.multiselect-item').forEach(item=>{
+    const cb = item.querySelector('input');
+    item.hidden = !!(cb && q && !cb.value.toLowerCase().includes(q));
   });
 }
 
-// Debounced: ticking several outlets quickly would otherwise fire one full
-// refetch (KPIs + charts + pivot + cascading dropdowns) per checkbox,
-// overlapping calls that queue up behind each other on the server's single
-// DB connection and make everything feel stuck. Only the button
-// label/checked state update immediately; the actual data refresh waits
-// until 300ms after the last change.
-let outletChangeDebounceTimer = null;
-function onOutletSelectionChange(allOutlets){
-  const list = document.getElementById('f_outlet_list');
-  const checked = [...list.querySelectorAll('input[type=checkbox]:checked')].map(cb=>cb.value);
-  filters.outlet = (checked.length===allOutlets.length) ? 'All' : checked;
-  document.getElementById('f_outlet_btn').textContent = outletButtonLabel(allOutlets);
-  clearTimeout(outletChangeDebounceTimer);
-  outletChangeDebounceTimer = setTimeout(async ()=>{
-    await populateCascadingFilters();
+// Debounced: ticking several boxes quickly would otherwise fire one full
+// refetch (KPIs + charts + pivot + cascading lists) per click, queueing up
+// behind each other on the server's single DB connection. Only the label
+// updates immediately; the data refresh waits 300ms after the last change.
+const msTimers = {};
+function onMultiSelectChange(key){
+  const all = [...msEl(key,'list').querySelectorAll('input[type=checkbox]')];
+  const checked = all.filter(cb=>cb.checked).map(cb=>cb.value);
+  filters[key] = (all.length && checked.length===all.length) ? 'All' : checked;
+  msEl(key,'btn').textContent = msLabel(key);
+  clearTimeout(msTimers[key]);
+  msTimers[key] = setTimeout(async ()=>{
+    if(key==='outlet') await populateCascadingFilters();
+    else if(key==='category'){
+      const outletCat = { ...(filters.outlet!=='All'?{outlet:filters.outlet}:{}), ...(filters.category!=='All'?{category:filters.category}:{}) };
+      renderMultiSelect('class_', await API.distinct('class_', outletCat));
+    }
     await updateAll();
   }, 300);
 }
 
-async function setAllOutlets(checked){
-  const list = document.getElementById('f_outlet_list');
-  const all = [...list.querySelectorAll('input[type=checkbox]')];
-  all.forEach(cb=>{ cb.checked = checked; });
-  filters.outlet = checked ? 'All' : [];
-  document.getElementById('f_outlet_btn').textContent = outletButtonLabel(all.map(cb=>cb.value));
-  await populateCascadingFilters();
-  await updateAll();
+function setMultiSelectVisible(key, checked){
+  msEl(key,'list').querySelectorAll('.multiselect-item:not([hidden]) input[type=checkbox]').forEach(cb=>{ cb.checked = checked; });
+  onMultiSelectChange(key);
+}
+
+function initMultiSelects(){
+  for(const key of Object.keys(MS_DIMS)){
+    msEl(key,'btn').addEventListener('click', (e)=>{
+      e.stopPropagation();
+      const panel = msEl(key,'panel');
+      const opening = panel.classList.contains('hidden');
+      document.querySelectorAll('.multiselect-panel').forEach(p=>p.classList.add('hidden'));
+      if(opening){ panel.classList.remove('hidden'); msEl(key,'search').focus(); }
+    });
+    msEl(key,'all').addEventListener('click', ()=>setMultiSelectVisible(key, true));
+    msEl(key,'none').addEventListener('click', ()=>setMultiSelectVisible(key, false));
+    msEl(key,'search').addEventListener('input', ()=>applyMultiSelectSearch(key));
+    msEl(key,'list').addEventListener('change', (e)=>{ if(e.target.matches('input[type=checkbox]')) onMultiSelectChange(key); });
+  }
+  document.addEventListener('click', (e)=>{
+    if(!e.target.closest('.multiselect')) document.querySelectorAll('.multiselect-panel').forEach(p=>p.classList.add('hidden'));
+  });
+  document.addEventListener('keydown', (e)=>{
+    if(e.key==='Escape') document.querySelectorAll('.multiselect-panel').forEach(p=>p.classList.add('hidden'));
+  });
 }
 
 async function onFilterChange(){
-  filters.category = document.getElementById('f_category').value;
-  filters.class_ = document.getElementById('f_class').value;
-  filters.supplier = document.getElementById('f_supplier').value;
   const df = document.getElementById('dateFrom').value;
   const dt = document.getElementById('dateTo').value;
   filters.dateFrom = df ? new Date(df+'T00:00:00') : null;
   filters.dateTo = dt ? new Date(dt+'T23:59:59') : null;
-  await populateFilterOptions();
   await updateAll();
 }
 
@@ -3034,11 +3097,23 @@ async function renderTargetReport(outEl, myGen){
   if(myGen!==reportRenderGen) return;
 
   // 2. Index targets and actuals.
+  // Top-bar filters that make sense against targets: Outlet, Category and
+  // Class (targets are per outlet x class). Supplier and dates don't apply --
+  // a class target isn't split by supplier, and the month/till-date pickers
+  // above set the period.
   const fo = filters.outlet;
   const outletAllowed = (o)=> !Array.isArray(fo) || fo.includes(o);
+  let classAllowedSet = null;
+  if(Array.isArray(filters.class_)) classAllowedSet = new Set(filters.class_);
+  if(Array.isArray(filters.category)){
+    const inCats = new Set(await API.distinct('class_', { category: filters.category }));
+    classAllowedSet = classAllowedSet ? new Set([...classAllowedSet].filter(c=>inCats.has(c))) : inCats;
+  }
+  if(myGen!==reportRenderGen) return;
+  const classAllowed = (c)=> !classAllowedSet || classAllowedSet.has(c);
   const tByOutlet = new Map();
   for(const t of tg.targets){
-    if(!outletAllowed(t.outlet)) continue;
+    if(!outletAllowed(t.outlet) || !classAllowed(t.class_)) continue;
     if(!tByOutlet.has(t.outlet)) tByOutlet.set(t.outlet, []);
     tByOutlet.get(t.outlet).push(t);
   }
@@ -3389,21 +3464,12 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     setStatus('Could not reach the server.', 'err');
   }
 
-  ['f_category','f_class','f_supplier','dateFrom','dateTo'].forEach(id=>{
+  ['dateFrom','dateTo'].forEach(id=>{
     document.getElementById(id).addEventListener('change', onFilterChange);
   });
   document.getElementById('resetFiltersBtn').addEventListener('click', resetFilters);
 
-  document.getElementById('f_outlet_btn').addEventListener('click', (e)=>{
-    e.stopPropagation();
-    document.getElementById('f_outlet_panel').classList.toggle('hidden');
-  });
-  document.getElementById('f_outlet_all').addEventListener('click', ()=>setAllOutlets(true));
-  document.getElementById('f_outlet_none').addEventListener('click', ()=>setAllOutlets(false));
-  document.addEventListener('click', (e)=>{
-    const wrap = document.getElementById('f_outlet_wrap');
-    if(wrap && !wrap.contains(e.target)) document.getElementById('f_outlet_panel').classList.add('hidden');
-  });
+  initMultiSelects();
 
   document.querySelectorAll('.tab-btn').forEach(b=>{
     b.addEventListener('click', ()=>switchTab(b.dataset.tab));
