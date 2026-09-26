@@ -3022,16 +3022,13 @@ async function renderTargetReport(outEl, myGen){
   const today = new Date(); today.setHours(0,0,0,0);
   const yesterday = addDays(today,-1);
   const dataMax = getDataMaxDate();
-  const notes = [];
   let asOf = tgtState.asOf ? parseYMD(tgtState.asOf) : yesterday;
   if(asOf > monthEnd) asOf = monthEnd;
   if(asOf > dataMax && dataMax >= monthStart){
-    notes.push(`Sales data on the server only goes up to <b>${fmtDayMon(dataMax)}</b> — figures are shown till then.`);
     asOf = dataMax;
   }
   const elapsed = asOf >= monthStart ? asOf.getDate() : 0;
   const remaining = dim - elapsed;
-  if(elapsed===0) notes.push('No sales days in this month yet (as of the selected date) — targets are shown with zero actuals.');
 
   const actualRows = elapsed ? await loadTargetActuals(fmtDate(monthStart), fmtDate(asOf)) : [];
   if(myGen!==reportRenderGen) return;
@@ -3071,9 +3068,6 @@ async function renderTargetReport(outEl, myGen){
   outlets.sort((a,b)=>b.m.st-a.m.st);
   const gsum = (f)=> outlets.reduce((s,o)=>s+f(o),0);
   const G = tgtMetrics(gsum(o=>o.m.st), gsum(o=>o.m.pt), gsum(o=>o.m.actual), gsum(o=>o.m.gp), elapsed, dim);
-  const gOther = gsum(o=>o.other);
-  for(const o of outlets) if(elapsed>0 && o.m.actual===0) notes.push(`<b>${escapeHtml(o.outlet)}</b> has a target but no sales in the data for this period — check the outlet name in the iTrade export.`);
-  const withoutTarget = [...otherByOutlet.keys()].filter(o=>!tByOutlet.has(o) && outletAllowed(o));
 
   const tillLbl = elapsed ? fmtDayMon(asOf) : '—';
 
@@ -3084,8 +3078,6 @@ async function renderTargetReport(outEl, myGen){
     <div class="filter-group"><label>Actual sales till</label><input type="date" id="tgt_asof" value="${elapsed?fmtDate(asOf):''}" min="${fmtDate(monthStart)}" max="${fmtDate(monthEnd)}"></div>
     ${tgtState.asOf ? '<button class="layout-btn" id="tgt_asof_reset">Back to yesterday</button>' : ''}
   </div>`;
-  html += `<p class="pivot-note">Daily target = monthly target ÷ ${dim} days. Target till ${tillLbl} = ${elapsed} of ${dim} days (${fmtPct(elapsed/dim)} of the month). Today's sales are not included.${Array.isArray(fo)?' Outlet filter from the top bar is applied.':''}</p>`;
-  for(const n of notes) html += `<p class="pivot-note tgt-warn">⚠ ${n}</p>`;
 
   const card = (label, value, sub, cls)=>`<div class="kpi-card ${cls||''}"><div class="kpi-label">${label}</div><div class="kpi-value">${value}</div>${sub?`<div class="kpi-sub">${sub}</div>`:''}</div>`;
   html += '<div class="kpi-grid tgt-kpis">';
@@ -3117,16 +3109,9 @@ async function renderTargetReport(outEl, myGen){
       }
       expRows.push(expRow('   '+c.class_, c.m, c.staff, c.supervisor));
     }
-    if(expanded && o.other){
-      html += `<tr class="level-1 tgt-other"><td class="rowhead"><span class="expand-toggle"></span>Other sales (classes with no target)</td><td>—</td><td>—</td><td>—</td><td>${fmtMoney(o.other)}</td><td colspan="10" class="rowhead">not counted in achievement</td></tr>`;
-    }
-    if(o.other) expRows.push(['   Other sales (no target, not counted)', null, null, null, o.other, null, null, null, null, null, null, null, null, '', '']);
   }
   html += `<tr class="total-row"><td class="rowhead">Grand Total</td>${numCells(G)}<td></td><td></td></tr>`;
   html += '</tbody></table></div>';
-  html += `<p class="report-legend"><span class="legend-dot above"></span> At/above 100% &nbsp; <span class="legend-dot warn"></span> 90–99% &nbsp; <span class="legend-dot below"></span> Below 90% — of the target till ${tillLbl}. Click ▸ for the class breakdown with staff and supervisor.</p>`;
-  if(gOther) html += `<p class="pivot-note">Other sales in classes that have no target (e.g. shop consumption): ${fmtMoney(gOther)} — shown per outlet, not counted in achievement.</p>`;
-  if(withoutTarget.length) html += `<p class="pivot-note">Outlets with sales but no target this month (not shown): ${withoutTarget.map(escapeHtml).join(', ')}.</p>`;
 
   // 6. Day-wise table for a chosen outlet/class scope.
   if(tgtState.dwOutlet!=='__all' && !tByOutlet.has(tgtState.dwOutlet)){ tgtState.dwOutlet='__all'; tgtState.dwClass='__all'; }
@@ -3158,8 +3143,6 @@ async function renderTargetReport(outEl, myGen){
   const tdT = dT*elapsed, tdP = dP*elapsed;
   html += `<tr class="total-row"><td class="rowhead">Till ${tillLbl}</td><td class="rowhead">${elapsed} days</td><td>${fmtMoney(tdT)}</td><td>${fmtMoney(cumA)}</td>${achTd(tdT>0?cumA/tdT:null)}${varTd(cumA-tdT)}<td>${fmtMoney(cumT)}</td><td>${fmtMoney(cumA)}</td>${achTd(cumT>0?cumA/cumT:null)}<td>${fmtMoney(tdP)}</td><td>${fmtMoney(cumGP)}</td>${achTd(tdP>0?cumGP/tdP:null)}</tr>`;
   html += '</tbody></table></div>';
-  const pBal = Math.max(pST-cumA,0);
-  html += `<p class="pivot-note">Month target for this selection: ${fmtMoney(pST)} · achieved ${fmtPct(pST?cumA/pST:null)} · balance ${fmtMoney(pBal)}${remaining>0?` · needs ${fmtMoney(pBal/remaining)} per day for the remaining ${remaining} days`:''}.</p>`;
 
   // 7. Outlet x day matrix.
   html += '<div class="report-subtitle">Outlet × day — each day\'s sales vs that outlet\'s daily target</div>';
