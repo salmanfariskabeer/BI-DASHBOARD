@@ -1120,6 +1120,65 @@ const DIM_FIELDS = {
 };
 const DIM_ORDER = ['outlet','category','class_','subclass','group','brand','supplier','item','month','weekday'];
 
+/* ============================================================
+   FIXED DISPLAY ORDER + PRETTY NAMES for Category/Class -- a merchandising
+   hierarchy (Supermarket, Fresh Food, Department, Lifestyle, Others; classes
+   grouped the same way), not alphabetical or by sales value. Mirrors
+   CATEGORY_ORDER/CLASS_ORDER in server.js (which does the actual row
+   ordering for anything fetched via API.aggregate/API.distinct) -- keep
+   both in sync. The handful of client-side arrays that AREN'T built from a
+   fresh server call (Target report's per-class breakdown, the Settings
+   class list) are sorted with sortByPriority() below.
+   ============================================================ */
+const CATEGORY_ORDER = ['SUPERMARKET','FRESH FOOD','DEPARTMENT','LIFESTYLE','OTHERS'];
+const CLASS_ORDER = [
+  'GROCERY FOOD','GROCERY NON FOOD','HEALTH AND BEAUTY','CHILLED AND DAIRY','FROZEN FOODS',
+  'ROASTERY','FRUITS&VEGETABLE','BUTCHERY','FISH','BAKERY','HOT FOOD','DELICATESSEN',
+  'HOUSEHOLD','ELECTRONICS','HOME APPLIANCE ITEMS','MOBILE & IT','GARMENTS','FOOT WEAR',
+  'HOME FURNISHING','LUGGAGE','STATIONERY','TOYS  & SPORTS','WATCH & ACCESSORIES',
+  'JEWELLERIES & ACCESSORIES','TOBACCO&ACC','SERVICES','OVERHEADS',
+];
+const DIM_PRIORITY = { category: CATEGORY_ORDER, class_: CLASS_ORDER };
+function priorityIndex(dimKey, val){
+  const order = DIM_PRIORITY[dimKey];
+  if(!order) return 0;
+  const i = order.indexOf(val);
+  return i<0 ? order.length+1000 : i;
+}
+// Sorts values already on the client (not freshly fetched, so not already
+// server-ordered) by the fixed priority; a no-op for any other dimension.
+function sortByPriority(dimKey, arr, keyFn){
+  if(!DIM_PRIORITY[dimKey]) return arr;
+  keyFn = keyFn || (x=>x);
+  return [...arr].sort((a,b)=>priorityIndex(dimKey,keyFn(a)) - priorityIndex(dimKey,keyFn(b)));
+}
+
+// Pretty Class names -- the source data uses abbreviated/inconsistent
+// spellings (legacy from iTrade); this is purely cosmetic; every filter,
+// checkbox value and lookup still uses the raw value underneath.
+const CLASS_DISPLAY = {
+  'GROCERY FOOD':'Grocery Food', 'GROCERY NON FOOD':'Grocery Non Food',
+  'HEALTH AND BEAUTY':'Health & Beauty', 'CHILLED AND DAIRY':'Chilled & Dairy',
+  'FROZEN FOODS':'Frozen Foods', 'ROASTERY':'Roastery', 'FRUITS&VEGETABLE':'Fruits & Vegetables',
+  'BUTCHERY':'Butchery', 'FISH':'Fish & Sea Food', 'BAKERY':'Bakery', 'HOT FOOD':'Hot Food',
+  'DELICATESSEN':'Delicatessen', 'HOUSEHOLD':'Household', 'ELECTRONICS':'Electronics',
+  'HOME APPLIANCE ITEMS':'Home Appliances', 'MOBILE & IT':'Mobile & IT', 'GARMENTS':'Textiles',
+  'FOOT WEAR':'Footwear', 'HOME FURNISHING':'Home Furnishing', 'LUGGAGE':'Luggage',
+  'STATIONERY':'Stationery', 'TOYS  & SPORTS':'Toys & Sports', 'WATCH & ACCESSORIES':'Watches & Accessories',
+  'JEWELLERIES & ACCESSORIES':'Jewellery & Accessories', 'TOBACCO&ACC':'Tobacco & Accessories',
+  'SERVICES':'Services', 'OVERHEADS':'Overheads',
+};
+function titleCaseFallback(s){
+  return String(s).toLowerCase().replace(/\b\w/g, c=>c.toUpperCase());
+}
+// The one place Class values get their display text -- anything not in the
+// map above (a stray/junk value) still gets a readable Title Case instead
+// of raw ALL CAPS, rather than looking broken.
+function classLabel(raw){
+  if(raw==null || raw==='') return raw;
+  return CLASS_DISPLAY[raw] || titleCaseFallback(raw);
+}
+
 const METRICS = {
   sales: { label:'Sales',   short:'Sales (AED)',   agg:'sum',   field:'sales', fmt:fmtMoney, type:'money' },
   cost:  { label:'Cost',    short:'Cost (AED)',    agg:'sum',   field:'cost',  fmt:fmtMoney, type:'money' },
@@ -1430,7 +1489,7 @@ function renderMultiSelect(key, values){
   msEl(key,'list').innerHTML = values.map(v=>`
     <label class="multiselect-item">
       <input type="checkbox" value="${escapeAttr(v)}" ${checkedSet.has(v)?'checked':''}>
-      <span>${escapeHtml(v)}</span>
+      <span>${escapeHtml(key==='class_'?classLabel(v):v)}</span>
     </label>`).join('') || `<div class="multiselect-item" style="color:var(--text-dim);cursor:default;">Nothing found</div>`;
   applyMultiSelectSearch(key);
   msEl(key,'btn').textContent = msLabel(key);
@@ -1649,7 +1708,7 @@ async function renderCharts(){
     API.aggregate({ filters:bf, groupBy:'day', sortMetric:'sales', sortDir:'desc' }),
   ]);
   upsertBarChart('chartCategory', catRes.rows.map(r=>r.key), catRes.rows.map(r=>r.sales));
-  upsertBarChart('chartClass', classRes.rows.map(r=>r.key), classRes.rows.map(r=>r.sales), true);
+  upsertBarChart('chartClass', classRes.rows.map(r=>classLabel(r.key)), classRes.rows.map(r=>r.sales), true);
 
   const dayRows = [...dayRes.rows].sort((a,b)=>a.key<b.key?-1:1);
   upsertLineChart('chartTrend', dayRows.map(r=>r.key), dayRows.map(r=>r.sales));
@@ -2048,9 +2107,11 @@ function renderFieldZones(){
 let valuePickerChecked = new Set();
 let valuePickerAllValues = [];
 let valuePickerOnApply = null;
+let valuePickerDimKey = null;
 
 async function openValuePicker(dimKey, extra, currentFilterArr, onApply, titleText){
   if(!dimKey) return;
+  valuePickerDimKey = dimKey;
   valuePickerAllValues = await API.distinct(dimKey, baseFilters(), extra);
   if(currentFilterArr && currentFilterArr.length>0){
     valuePickerChecked = new Set(currentFilterArr.filter(v=>valuePickerAllValues.includes(v)));
@@ -2099,7 +2160,7 @@ function renderColumnPickerList(filterText){
   const visible = valuePickerAllValues.filter(v=>!ft || String(v).toLowerCase().includes(ft));
   if(visible.length===0){ wrap.innerHTML = '<p class="modal-empty">No matches.</p>'; return; }
   wrap.innerHTML = visible.map(v=>
-    `<label class="modal-check-item"><input type="checkbox" data-val="${escapeAttr(v)}" ${valuePickerChecked.has(v)?'checked':''}> ${escapeHtml(String(v))}</label>`
+    `<label class="modal-check-item"><input type="checkbox" data-val="${escapeAttr(v)}" ${valuePickerChecked.has(v)?'checked':''}> ${escapeHtml(valuePickerDimKey==='class_'?classLabel(v):String(v))}</label>`
   ).join('');
   wrap.querySelectorAll('input[type=checkbox]').forEach(cb=>{
     cb.addEventListener('change', ()=>{
@@ -2171,7 +2232,8 @@ async function getColumnValues(){
   if(pivotConfig.columnFilter && pivotConfig.columnFilter.length>0){
     const allVals = await API.distinct(dimKey, baseFilters(), extra);
     const allowed = new Set(pivotConfig.columnFilter);
-    let values = allVals.filter(v=>allowed.has(v)).sort();
+    let values = allVals.filter(v=>allowed.has(v));
+    if(!DIM_PRIORITY[dimKey]) values = values.sort();
     let capped = false;
     if(values.length > MAX_EXPLICIT_COLUMNS){ values = values.slice(0, MAX_EXPLICIT_COLUMNS); capped = true; }
     return { values, capped, totalCount: allVals.length, filtered:true };
@@ -2182,7 +2244,8 @@ async function getColumnValues(){
     limit: MAX_COLUMN_VALUES, sortMetric: sqlSortMetric(pivotConfig.values[0]), sortDir:'desc'
   });
   const capped = res.totalGroups > MAX_COLUMN_VALUES;
-  return { values: res.rows.map(r=>r.key).sort(), capped, totalCount: res.totalGroups, filtered:false };
+  const colKeys = res.rows.map(r=>r.key);
+  return { values: DIM_PRIORITY[dimKey] ? colKeys : colKeys.sort(), capped, totalCount: res.totalGroups, filtered:false };
 }
 
 // Mirrors the original recursive buildRows(), but each level is one server
@@ -2230,7 +2293,7 @@ async function buildRowsAsync(ancestorExtra, levels, colDim, colValues, path, le
       cells = pivotConfig.values.map(k => getMetricDef(k).getValue(r));
     }
     const hasChildren = levelIdx+1 < levels.length;
-    out.push({ level:levelIdx, dimKey, label:String(r.key), path:rowPath, cells, totalCells, hasChildren,
+    out.push({ level:levelIdx, dimKey, label: dimKey==='class_' ? classLabel(r.key) : String(r.key), path:rowPath, cells, totalCells, hasChildren,
                expanded: expandedPaths.has(rowPath) });
     if(hasChildren && expandedPaths.has(rowPath)){
       await buildRowsAsync([...ancestorExtra, {dim:dimKey, values:[r.key]}], levels, colDim, colValues, rowPath, levelIdx+1, out);
@@ -2292,7 +2355,8 @@ async function renderPivotTable(){
       exportHeaders = [DIM_FIELDS[levels[0]].label];
       exportColTypes = ['text'];
       for(const cv of colValues){
-        for(const m of pivotConfig.values){ exportHeaders.push(cv+' — '+getMetricDef(m).short); exportColTypes.push(getMetricDef(m).type); }
+        const cvLabel = colDim==='class_' ? classLabel(cv) : cv;
+        for(const m of pivotConfig.values){ exportHeaders.push(cvLabel+' — '+getMetricDef(m).short); exportColTypes.push(getMetricDef(m).type); }
       }
       for(const m of pivotConfig.values){ exportHeaders.push('Total — '+getMetricDef(m).short); exportColTypes.push(getMetricDef(m).type); }
     } else {
@@ -2321,7 +2385,7 @@ async function renderPivotTable(){
     html += '<table class="pivot"><thead>';
     if(colValues){
       html += '<tr><th class="rowhead" rowspan="2">'+DIM_FIELDS[levels[0]].label+'</th>';
-      for(const cv of colValues){ html += `<th colspan="${nMetrics}" class="col-group">${escapeHtml(String(cv))}</th>`; }
+      for(const cv of colValues){ html += `<th colspan="${nMetrics}" class="col-group">${escapeHtml(colDim==='class_'?classLabel(cv):String(cv))}</th>`; }
       html += `<th colspan="${nMetrics}" class="col-group total-group">Total</th></tr><tr>`;
       for(const cv of colValues){ for(const s of metricShorts) html += '<th class="sub-col">'+escapeHtml(s)+'</th>'; }
       for(const s of metricShorts) html += '<th class="sub-col total-group">'+escapeHtml(s)+'</th>';
@@ -2675,7 +2739,7 @@ async function buildHierarchyRowsAsync(reportFilters, ancestorExtra, path, level
   for(const r of res.rows){
     const rowPath = path+'>>'+dimKey+':'+r.key;
     const hasChildren = levelIdx+1 < REPORT_HIERARCHY.length;
-    out.push({ level:levelIdx, dimKey, label:String(r.key), path:rowPath, sums:r, hasChildren, expanded:reportExpandedPaths.has(rowPath) });
+    out.push({ level:levelIdx, dimKey, label: dimKey==='class_' ? classLabel(r.key) : String(r.key), path:rowPath, sums:r, hasChildren, expanded:reportExpandedPaths.has(rowPath) });
     if(hasChildren && reportExpandedPaths.has(rowPath)){
       await buildHierarchyRowsAsync(reportFilters, [...ancestorExtra, {dim:dimKey, values:[r.key]}], rowPath, levelIdx+1, out);
     }
@@ -2694,7 +2758,8 @@ async function buildHierarchyCompareRowsAsync(filtersA, filtersB, ancestorExtra,
   const bMap = new Map(resB.rows.map(r=>[r.key, r]));
   const allKeys = new Set([...aMap.keys(), ...bMap.keys()]);
   let entries = [...allKeys].map(val=>({ val, aSums: aMap.get(val)||ZERO_SUMS, bSums: bMap.get(val)||ZERO_SUMS }));
-  entries.sort((x,y)=>y.aSums.sales - x.aSums.sales);
+  if(DIM_PRIORITY[dimKey]) entries.sort((x,y)=>priorityIndex(dimKey,x.val) - priorityIndex(dimKey,y.val));
+  else entries.sort((x,y)=>y.aSums.sales - x.aSums.sales);
 
   const showAllKey = path+'::'+levelIdx;
   const isLeafLevel = levelIdx === REPORT_HIERARCHY.length-1;
@@ -2705,7 +2770,7 @@ async function buildHierarchyCompareRowsAsync(filtersA, filtersB, ancestorExtra,
   for(const e of visible){
     const rowPath = path+'>>'+dimKey+':'+e.val;
     const hasChildren = levelIdx+1 < REPORT_HIERARCHY.length;
-    out.push({ level:levelIdx, dimKey, label:String(e.val), path:rowPath, aSums:e.aSums, bSums:e.bSums, hasChildren, expanded:reportExpandedPaths.has(rowPath) });
+    out.push({ level:levelIdx, dimKey, label: dimKey==='class_' ? classLabel(e.val) : String(e.val), path:rowPath, aSums:e.aSums, bSums:e.bSums, hasChildren, expanded:reportExpandedPaths.has(rowPath) });
     if(hasChildren && reportExpandedPaths.has(rowPath)){
       await buildHierarchyCompareRowsAsync(filtersA, filtersB, [...ancestorExtra, {dim:dimKey, values:[e.val]}], rowPath, levelIdx+1, out);
     }
@@ -3007,7 +3072,7 @@ async function renderAboveBelowAverage(outEl, dim, metric, myGen){
     const diff = v-avg;
     const cls = v>=avg ? 'above-avg' : 'below-avg';
     const diffStr = (diff>=0?'+':'') + metricDef.fmt(diff);
-    html += `<tr class="${cls}"><td class="rowhead">${escapeHtml(String(row.val))}</td><td>${metricDef.fmt(v)}</td><td>${diffStr}</td></tr>`;
+    html += `<tr class="${cls}"><td class="rowhead">${escapeHtml(dim==='class_'?classLabel(row.val):String(row.val))}</td><td>${metricDef.fmt(v)}</td><td>${diffStr}</td></tr>`;
     exportRows.push([String(row.val), v, diff]);
   }
   html += '</tbody></table>';
@@ -3135,7 +3200,7 @@ async function renderTargetReport(outEl, myGen){
     const classes = list.map(t=>{
       const a = act.get(outlet+'|'+t.class_) || {sales:0,cost:0};
       return { ...t, m: tgtMetrics(t.sales_target, t.profit_target, a.sales, a.sales-a.cost, elapsed, dim) };
-    }).sort((a,b)=>b.sales_target-a.sales_target);
+    }).sort((a,b)=>priorityIndex('class_',a.class_) - priorityIndex('class_',b.class_));
     const sum = (f)=> classes.reduce((s,c)=>s+f(c),0);
     const m = tgtMetrics(sum(c=>c.sales_target), sum(c=>c.profit_target), sum(c=>c.m.actual), sum(c=>c.m.gp), elapsed, dim);
     outlets.push({ outlet, classes, m, other: otherByOutlet.get(outlet)||0 });
@@ -3180,9 +3245,9 @@ async function renderTargetReport(outEl, myGen){
     expRows.push(expRow(o.outlet, o.m));
     for(const c of o.classes){
       if(expanded){
-        html += `<tr class="level-1"><td class="rowhead"><span class="expand-toggle"></span>${escapeHtml(c.class_)}${c.source_class&&c.source_class!==c.class_?` <span class="tgt-src" title="Name in the target file">(${escapeHtml(c.source_class)})</span>`:''}</td>${numCells(c.m)}<td class="rowhead tgt-staff" title="${escapeAttr(c.staff||'')}">${escapeHtml(c.staff||'')}</td><td class="rowhead tgt-staff">${escapeHtml(c.supervisor||'')}</td></tr>`;
+        html += `<tr class="level-1"><td class="rowhead"><span class="expand-toggle"></span>${escapeHtml(classLabel(c.class_))}</td>${numCells(c.m)}<td class="rowhead tgt-staff" title="${escapeAttr(c.staff||'')}">${escapeHtml(c.staff||'')}</td><td class="rowhead tgt-staff">${escapeHtml(c.supervisor||'')}</td></tr>`;
       }
-      expRows.push(expRow('   '+c.class_, c.m, c.staff, c.supervisor));
+      expRows.push(expRow('   '+classLabel(c.class_), c.m, c.staff, c.supervisor));
     }
   }
   html += `<tr class="total-row"><td class="rowhead">Grand Total</td>${numCells(G)}<td></td><td></td></tr>`;
@@ -3192,7 +3257,7 @@ async function renderTargetReport(outEl, myGen){
   if(tgtState.dwOutlet!=='__all' && !tByOutlet.has(tgtState.dwOutlet)){ tgtState.dwOutlet='__all'; tgtState.dwClass='__all'; }
   const scopeTargets = [];
   for(const o of outlets) if(tgtState.dwOutlet==='__all' || o.outlet===tgtState.dwOutlet) for(const c of o.classes) scopeTargets.push(c);
-  const classOpts = [...new Set(scopeTargets.map(c=>c.class_))].sort();
+  const classOpts = sortByPriority('class_', [...new Set(scopeTargets.map(c=>c.class_))]);
   if(tgtState.dwClass!=='__all' && !classOpts.includes(tgtState.dwClass)) tgtState.dwClass='__all';
   const pairs = scopeTargets.filter(c=> tgtState.dwClass==='__all' || c.class_===tgtState.dwClass);
   const pST = pairs.reduce((s,c)=>s+c.sales_target,0), pPT = pairs.reduce((s,c)=>s+c.profit_target,0);
@@ -3200,7 +3265,7 @@ async function renderTargetReport(outEl, myGen){
   html += '<div class="report-subtitle">Day-wise — daily target vs actual</div>';
   html += `<div class="pivot-controls tgt-controls">
     <div class="filter-group"><label>Outlet</label><select id="tgt_dw_outlet"><option value="__all">All outlets (${outlets.length})</option>${outlets.map(o=>`<option value="${escapeAttr(o.outlet)}"${o.outlet===tgtState.dwOutlet?' selected':''}>${escapeHtml(o.outlet)}</option>`).join('')}</select></div>
-    <div class="filter-group"><label>Class</label><select id="tgt_dw_class"><option value="__all">All target classes</option>${classOpts.map(c=>`<option value="${escapeAttr(c)}"${c===tgtState.dwClass?' selected':''}>${escapeHtml(c)}</option>`).join('')}</select></div>
+    <div class="filter-group"><label>Class</label><select id="tgt_dw_class"><option value="__all">All target classes</option>${classOpts.map(c=>`<option value="${escapeAttr(c)}"${c===tgtState.dwClass?' selected':''}>${escapeHtml(classLabel(c))}</option>`).join('')}</select></div>
   </div>`;
   const dwHeads = ['Date','Day','Daily Target','Actual','Ach %','Variance','Cum. Target','Cum. Actual','Cum. Ach %','Daily Profit Tgt','Actual GP','GP Ach %'];
   html += '<div class="tbl-scroll"><table class="pivot tgt-table"><thead><tr>'+dwHeads.map((h,i)=>`<th${i<2?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
@@ -3359,7 +3424,7 @@ async function renderSettingsTargetsTable(){
   const [classes, tg] = await Promise.all([ API.distinct('class_', { outlet }), API.getTargets(month) ]);
   const tmap = new Map(tg.month===month ? tg.targets.filter(t=>t.outlet===outlet).map(t=>[t.class_, t]) : []);
   const all = [...new Set([...tmap.keys(), ...classes])];
-  all.sort((a,b)=> ((tmap.get(b)||{}).sales_target||0) - ((tmap.get(a)||{}).sales_target||0) || a.localeCompare(b));
+  all.sort((a,b)=>priorityIndex('class_',a) - priorityIndex('class_',b));
   let totS = 0, totP = 0;
   for(const t of tmap.values()){ totS += t.sales_target; totP += t.profit_target; }
 
@@ -3368,7 +3433,7 @@ async function renderSettingsTargetsTable(){
   let html = `<table class="pivot"><thead><tr><th class="rowhead">Class</th><th>Sales Target (AED)</th><th>Profit Target (AED)</th><th class="rowhead">Staff</th><th class="rowhead">Supervisor</th><th></th></tr></thead><tbody>`;
   for(const c of all){
     const t = tmap.get(c) || {};
-    html += `<tr><td class="rowhead">${escapeHtml(c)}</td><td>${inp(c,'sales_target',t.sales_target)}</td><td>${inp(c,'profit_target',t.profit_target)}</td>
+    html += `<tr><td class="rowhead">${escapeHtml(classLabel(c))}</td><td>${inp(c,'sales_target',t.sales_target)}</td><td>${inp(c,'profit_target',t.profit_target)}</td>
       <td class="rowhead tgt-staff" title="${escapeAttr(t.staff||'')}">${escapeHtml(t.staff||'')}</td><td class="rowhead tgt-staff">${escapeHtml(t.supervisor||'')}</td>
       <td><span class="target-status" data-class="${escapeAttr(c)}" style="font-size:11px;"></span></td></tr>`;
   }

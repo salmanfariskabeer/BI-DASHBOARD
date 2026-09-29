@@ -89,6 +89,33 @@ function dimExpr(dim) {
   if (!expr) throw new Error('Unknown dimension: ' + dim);
   return expr;
 }
+
+// Fixed report/display order for Category and Class -- business-defined
+// (a merchandising hierarchy: Supermarket, Fresh Food, Department, Lifestyle,
+// Others; classes grouped the same way within each), not alphabetical or by
+// sales value. Mirrored in public/index.html as CATEGORY_ORDER/CLASS_ORDER --
+// keep both in sync if this list ever changes. Anything not listed here
+// (a handful of low/zero-volume stray values) sorts after everything listed.
+const CATEGORY_ORDER = ['SUPERMARKET', 'FRESH FOOD', 'DEPARTMENT', 'LIFESTYLE', 'OTHERS'];
+const CLASS_ORDER = [
+  'GROCERY FOOD', 'GROCERY NON FOOD', 'HEALTH AND BEAUTY', 'CHILLED AND DAIRY',
+  'FROZEN FOODS', 'ROASTERY', 'FRUITS&VEGETABLE', 'BUTCHERY', 'FISH', 'BAKERY',
+  'HOT FOOD', 'DELICATESSEN', 'HOUSEHOLD', 'ELECTRONICS', 'HOME APPLIANCE ITEMS',
+  'MOBILE & IT', 'GARMENTS', 'FOOT WEAR', 'HOME FURNISHING', 'LUGGAGE', 'STATIONERY',
+  'TOYS  & SPORTS', 'WATCH & ACCESSORIES', 'JEWELLERIES & ACCESSORIES', 'TOBACCO&ACC',
+  'SERVICES', 'OVERHEADS',
+];
+const DIM_PRIORITY = { category: CATEGORY_ORDER, class_: CLASS_ORDER };
+
+// A SQL CASE expression ranking keyExpr by DIM_PRIORITY[dimKey], or null if
+// dimKey has no fixed order (every other dimension keeps its existing
+// value-based sort untouched).
+function priorityCaseExpr(dimKey, keyExpr) {
+  const order = DIM_PRIORITY[dimKey];
+  if (!order) return null;
+  const cases = order.map((v, i) => `WHEN ${esc(v)} THEN ${i}`).join(' ');
+  return `CASE ${keyExpr} ${cases} ELSE ${order.length + 1000} END`;
+}
 function esc(v) {
   return "'" + String(v).replace(/'/g, "''") + "'";
 }
@@ -398,10 +425,11 @@ app.post('/api/distinct', async (req, res) => {
   try {
     const { dim, filters, extra } = req.body || {};
     const where = buildWhere(filters, extra);
+    const priorityExpr = priorityCaseExpr(dim, 'v');
     const rows = await run(`
       SELECT DISTINCT ${dimExpr(dim)} AS v FROM sales
       WHERE ${where} AND ${dimExpr(dim)} <> ''
-      ORDER BY 1
+      ORDER BY ${priorityExpr ? priorityExpr + ' ASC, ' : ''}1
     `);
     res.json({ values: rows.map((r) => r.v) });
   } catch (err) {
@@ -629,11 +657,13 @@ app.post('/api/aggregate', async (req, res) => {
     const totalGroups = Number(tg.n);
     const lim = limit ? `LIMIT ${Math.max(1, parseInt(limit, 10))}` : '';
 
+    const priorityExpr = priorityCaseExpr(groupBy, 'key');
+    const orderClause = priorityExpr ? `${priorityExpr} ASC, ${orderExpr} DESC` : `${orderExpr} ${dir}`;
     const ranked = await run(`
       SELECT ${dimExpr(groupBy)} AS key, ${SUM_SELECT}
       FROM sales WHERE ${where}
       GROUP BY key
-      ORDER BY ${orderExpr} ${dir}
+      ORDER BY ${orderClause}
       ${lim}
     `);
     const rowsOut = ranked.map((r) => ({ key: r.key, ...withDerived(r) }));
