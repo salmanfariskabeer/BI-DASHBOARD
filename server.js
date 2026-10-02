@@ -387,6 +387,17 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// Lets the dashboard tell which door it came in through: a location-verified
+// session is left alone (convenient at the office), but a password session
+// is idle-locked client-side after PASSWORD_IDLE_LOCK_SECONDS -- typed from
+// anywhere, so it shouldn't stay open indefinitely on an unattended screen.
+// Read before requireAccess so it still answers (method: null) for a request
+// with no valid session at all, instead of 401ing before the client can ask.
+app.get('/api/auth/session', (req, res) => {
+  const s = readSession(req);
+  res.json({ ok: true, method: s ? s.m : null });
+});
+
 function hasValidBasicAuth(req) {
   const [scheme, encoded] = (req.headers.authorization || '').split(' ');
   if (scheme !== 'Basic' || !encoded) return false;

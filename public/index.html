@@ -1264,6 +1264,44 @@ const API = {
     return res;
   });
 })();
+
+// Idle auto-lock -- password sign-ins only. Signing in from the office via
+// location is left alone (that's the whole point of it being convenient);
+// a password typed from anywhere is assumed less trustworthy, so an
+// unattended screen re-locks itself rather than staying open indefinitely.
+// Location sign-ins get no idle timer at all.
+const PASSWORD_IDLE_LOCK_MS = 150 * 1000; // 2.5 minutes
+function startIdleAutoLock(){
+  let idleTimer = null;
+  let lastReset = 0;
+  const lock = async ()=>{
+    await fetch('/api/auth/logout', { method:'POST' }).catch(()=>{});
+    location.reload();
+  };
+  const reset = ()=>{
+    // Activity events (mousemove especially) can fire dozens of times a
+    // second -- only touch the timer at most once a second, not on every one.
+    const now = Date.now();
+    if(now - lastReset < 1000) return;
+    lastReset = now;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(lock, PASSWORD_IDLE_LOCK_MS);
+  };
+  ['mousemove','mousedown','keydown','wheel','touchstart','scroll'].forEach(evt=>{
+    document.addEventListener(evt, reset, { passive:true });
+  });
+  // Tabbing away doesn't count as activity by itself, but coming back to a
+  // tab that's been hidden past the limit should lock immediately rather
+  // than waiting for the next mouse move to notice.
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState==='visible' && Date.now()-lastReset >= PASSWORD_IDLE_LOCK_MS) lock();
+  });
+  reset();
+}
+fetch('/api/auth/session').then(r=>r.json()).then(j=>{
+  if(j && j.method==='password') startIdleAutoLock();
+}).catch(()=>{});
+
 // The build id the page was loaded with. If the server reports a different
 // one, a new version was deployed while this page/app stayed open: reload
 // right away if the user isn't looking, otherwise offer a one-click reload.
