@@ -93,6 +93,7 @@ body{min-height:100vh;}
 }
 .loadbar .status.ok{color:#9FD6BE;}
 .loadbar .status.err{color:#E8A79D;}
+.loadbar .status.idle-warn{color:#E8A79D; font-weight:600;}
 
 /* ---------- Main layout ---------- */
 .main{padding:20px clamp(16px, 2vw, 40px) 60px; max-width:none; margin:0 auto; box-sizing:border-box; width:100%;}
@@ -427,6 +428,10 @@ table.pivot td.total-group{ font-weight:600; background:#FBF8EF; }
 }
 .modal-empty{ font-size:12px; color:var(--text-dim); font-style:italic; text-align:center; padding:20px; }
 .modal-actions{ display:flex; justify-content:flex-end; gap:10px; }
+.target-export-choices{ display:flex; flex-direction:column; gap:10px; margin-bottom:14px; }
+.target-export-choice{ text-align:left; display:flex; flex-direction:column; gap:3px; padding:12px 14px; }
+.target-export-choice b{ font-size:13.5px; }
+.target-export-choice span{ font-size:11.5px; color:var(--text-dim); font-weight:400; }
 
 /* ---------- Presets ---------- */
 .presets{
@@ -711,6 +716,7 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
     Install App
   </button>
   <span class="status" id="loadStatus">Checking server…</span>
+  <span class="status hidden" id="idleLockStatus" title="This device signed in with the password, not a verified office location -- it locks itself if left untouched"></span>
   <button class="reset-btn" id="logoutBtn" style="margin-left:auto;color:#fff;border-color:rgba(255,255,255,0.35)" title="Sign out of the dashboard on this device">Log out</button>
 </div>
 
@@ -1046,6 +1052,26 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
   </div>
 </div>
 
+<div class="modal-overlay hidden" id="targetExportModal">
+  <div class="modal-box" style="width:380px">
+    <h3>Export Target vs Actual</h3>
+    <p class="pivot-note" style="padding:0;margin:0 0 14px;">What should the Outlet &amp; Class breakdown contain?</p>
+    <div class="target-export-choices">
+      <button class="layout-btn target-export-choice" id="targetExportOutlets">
+        <b>Outlets only</b>
+        <span>One row per outlet — no class detail, no Staff/Supervisor.</span>
+      </button>
+      <button class="layout-btn target-export-choice" id="targetExportOutletsClasses">
+        <b>Outlets + Classes</b>
+        <span>Outlet in column A, Class in column B — one row per outlet/class, ready to pivot in Excel.</span>
+      </button>
+    </div>
+    <div class="modal-actions">
+      <button class="layout-btn" id="targetExportCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay hidden" id="columnPickerModal">
   <div class="modal-box">
     <h3 id="columnPickerTitle">Choose columns to compare</h3>
@@ -1274,6 +1300,9 @@ const PASSWORD_IDLE_LOCK_MS = 150 * 1000; // 2.5 minutes
 function startIdleAutoLock(){
   let idleTimer = null;
   let lastReset = 0;
+  let lockAt = 0;
+  const statusEl = document.getElementById('idleLockStatus');
+  statusEl.classList.remove('hidden');
   const lock = async ()=>{
     await fetch('/api/auth/logout', { method:'POST' }).catch(()=>{});
     location.reload();
@@ -1284,6 +1313,7 @@ function startIdleAutoLock(){
     const now = Date.now();
     if(now - lastReset < 1000) return;
     lastReset = now;
+    lockAt = now + PASSWORD_IDLE_LOCK_MS;
     clearTimeout(idleTimer);
     idleTimer = setTimeout(lock, PASSWORD_IDLE_LOCK_MS);
   };
@@ -1296,6 +1326,14 @@ function startIdleAutoLock(){
   document.addEventListener('visibilitychange', ()=>{
     if(document.visibilityState==='visible' && Date.now()-lastReset >= PASSWORD_IDLE_LOCK_MS) lock();
   });
+  // Visible "locks in M:SS" countdown so a short idle gap never locks
+  // someone out with no warning.
+  setInterval(()=>{
+    const remainMs = Math.max(0, lockAt - Date.now());
+    const m = Math.floor(remainMs/60000), sec = Math.floor((remainMs%60000)/1000);
+    statusEl.textContent = 'Locks in ' + m + ':' + String(sec).padStart(2,'0');
+    statusEl.classList.toggle('idle-warn', remainMs <= 30000); // visibly warn in the last 30s
+  }, 1000);
   reset();
 }
 fetch('/api/auth/session').then(r=>r.json()).then(j=>{
@@ -3361,16 +3399,41 @@ async function renderTargetReport(outEl, myGen){
 
   const scopeLbl = (tgtState.dwOutlet==='__all'?'All outlets':tgtState.dwOutlet)+(tgtState.dwClass==='__all'?'':' / '+tgtState.dwClass);
   const mainColTypes = ['text','money','money','money','money','percent','money','percent','money','money','money','money','percent','text','text'];
+
+  // Two flat shapes for the Excel export's Outlet & Class sheet -- the
+  // on-screen table always shows the full drill-down, but the export asks
+  // which of these to write instead (see exportReportXLSX/downloadTargetExport):
+  //  - Outlets only: one row per outlet, no class rows, no Staff/Supervisor.
+  //  - Outlets + Classes: flat -- Outlet in column A, Class in column B,
+  //    repeated on every row (not blank/indented) -- so it's a normal data
+  //    table Excel's own PivotTable can use directly.
+  const metricHeads = heads.slice(1,13), metricColTypes = mainColTypes.slice(1,13);
+  const outletOnlyRows = outlets.map(o=>[o.outlet, ...expRow(o.outlet, o.m).slice(1,13)]);
+  const outletClassRows = [];
+  for(const o of outlets) for(const c of o.classes){
+    const r = expRow(c.class_, c.m, c.staff, c.supervisor);
+    outletClassRows.push([o.outlet, classLabel(c.class_), ...r.slice(1,13), r[13], r[14]]);
+  }
+  const targetVariants = {
+    outletOnly: { headers:['Outlet', ...metricHeads], rows:outletOnlyRows,
+      grandRow:['Grand Total', ...expRow('Grand Total', G).slice(1,13)], colTypes:['text', ...metricColTypes] },
+    outletClass: { headers:['Outlet','Class', ...metricHeads,'Staff','Supervisor'], rows:outletClassRows,
+      colTypes:['text','text', ...metricColTypes,'text','text'] },
+  };
+
   lastReportExport = {
     headers: heads, rows: expRows,
     grandRow: expRow('Grand Total', G),
     colTypes: mainColTypes,
     filename: 'target_vs_actual_'+month+'_till_'+(elapsed?fmtDate(asOf):'start'),
+    // Day-wise and Outlet x Day are unaffected by the Outlets-only/+Classes
+    // export choice (see targetVariants above) -- they're kept as-is and
+    // appended after whichever Outlet & Class shape gets picked.
     sheets: [
-      { name:'Outlet & Class', rows:[heads, ...expRows, expRow('Grand Total', G)], colTypes: mainColTypes },
       { name:'Day-wise', rows:[['Scope: '+scopeLbl], dwHeads, ...dwExp], colTypes:['text','text','money','money','percent','money','money','money','percent','money','money','percent'], headerRows:2 },
       { name:'Outlet x Day (AED)', rows:[['Outlet','Daily Target', ...dayKeys, 'Till date'], ...mxExp, ['All outlets', G.daily, ...dayTotals, G.actual]], colTypes:['text', ...Array(dayKeys.length+2).fill('money')] },
     ],
+    targetVariants,
   };
 }
 
@@ -3382,9 +3445,27 @@ function exportReportCSV(){
 }
 function exportReportXLSX(){
   if(!lastReportExport){ return; }
+  if(currentReport==='target' && lastReportExport.targetVariants){
+    document.getElementById('targetExportModal').classList.remove('hidden');
+    return;
+  }
   const allRows = [lastReportExport.headers, ...lastReportExport.rows, ...(lastReportExport.grandRow&&lastReportExport.grandRow.length?[lastReportExport.grandRow]:[])];
   if(lastReportExport.sheets){ downloadXLSXSheets(lastReportExport.sheets, (lastReportExport.filename||currentReport+'_report')+'.xlsx'); return; }
   downloadXLSX(allRows, currentReport+'_report.xlsx', 'Report', lastReportExport.colTypes);
+}
+
+// Target report only: the Excel export asks which shape the Outlet & Class
+// sheet should take (see targetVariants in renderTargetReport) -- Day-wise
+// and Outlet x Day are unaffected and always come along unchanged.
+function downloadTargetExport(variant){
+  document.getElementById('targetExportModal').classList.add('hidden');
+  if(!lastReportExport || !lastReportExport.targetVariants) return;
+  const tv = lastReportExport.targetVariants[variant];
+  const mainSheet = variant==='outletOnly'
+    ? { name:'Outlet Comparison', rows:[tv.headers, ...tv.rows, tv.grandRow], colTypes: tv.colTypes }
+    : { name:'Outlet & Class', rows:[tv.headers, ...tv.rows], colTypes: tv.colTypes };
+  const suffix = variant==='outletOnly' ? '_outlets' : '_outlets_classes';
+  downloadXLSXSheets([mainSheet, ...lastReportExport.sheets], (lastReportExport.filename||'target_report')+suffix+'.xlsx');
 }
 
 /* ============================================================
@@ -3650,6 +3731,11 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   });
   document.getElementById('reportCsvBtn').addEventListener('click', exportReportCSV);
   document.getElementById('reportXlsxBtn').addEventListener('click', exportReportXLSX);
+  const targetExportModal = document.getElementById('targetExportModal');
+  document.getElementById('targetExportOutlets').addEventListener('click', ()=>downloadTargetExport('outletOnly'));
+  document.getElementById('targetExportOutletsClasses').addEventListener('click', ()=>downloadTargetExport('outletClass'));
+  document.getElementById('targetExportCancel').addEventListener('click', ()=>targetExportModal.classList.add('hidden'));
+  targetExportModal.addEventListener('click', (e)=>{ if(e.target===targetExportModal) targetExportModal.classList.add('hidden'); });
   document.getElementById('reportPrintBtn').addEventListener('click', ()=>printSection('page-reports'));
 
   document.getElementById('colPickAll').addEventListener('click', ()=>{
