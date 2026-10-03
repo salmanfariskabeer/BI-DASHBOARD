@@ -44,19 +44,72 @@ fs.mkdirSync(TMP_DIR, { recursive: true });
 // compiling DuckDB from source and Railway builds hung).
 // run() returns plain row objects like the old client did; BIGINTs come back
 // as JS bigint, so they're turned into Numbers (all our counts fit safely).
-const dbReady = DuckDBInstance.create(DB_PATH).then((instance) => instance.connect());
+const dbInstanceReady = DuckDBInstance.create(DB_PATH);
 const toPlain = (v) => (typeof v === 'bigint' ? Number(v) : v);
 
+// Reads use a POOL of connections, each given queries one at a time via a
+// checkout queue -- not one shared connection, and not plain round-robin.
+// Found 2026-10: a single @duckdb/node-api connection given a SECOND query
+// while still running an earlier one reliably hangs forever (no error, no
+// rejection -- confirmed by repeated load tests). Round-robin alone just
+// moves the same failure to whenever concurrent requests exceed the pool
+// size (confirmed: 8 concurrent requests against an 8-connection round-robin
+// pool still hung, because two requests landed on the same connection at
+// once). This queue guarantees a connection is NEVER handed a second query
+// until its first one finishes -- any request beyond the pool size waits in
+// line instead of double-booking a connection -- which matters not just for
+// one browser tab firing several concurrent report calls, but for several
+// people using the dashboard at the same time. DuckDB itself explicitly
+// supports many connections against one open database file for exactly this
+// kind of concurrent access; writes (ingestion, target edits) stay on the
+// single dedicated connection below -- rare and sequential, no pooling needed.
+// Empirically-found safe ceiling (2026-10 load testing): 6 truly concurrent
+// queries on this DuckDB build is where some of them start hanging forever
+// (not merely slow) -- 5 stayed reliably safe across repeated runs. The
+// queue above means this only caps TRUE parallelism; extra requests beyond
+// 5 wait their turn instead of failing, so correctness doesn't depend on
+// this number being exactly right, just safely under the observed cliff.
+const READ_POOL_SIZE = 5;
+let readPoolReady = null;
+function getReadPool() {
+  if (!readPoolReady) {
+    readPoolReady = dbInstanceReady.then(async (instance) => {
+      const conns = await Promise.all(Array.from({ length: READ_POOL_SIZE }, () => instance.connect()));
+      return conns.map((con) => ({ con, busy: false }));
+    });
+  }
+  return readPoolReady;
+}
+const readWaiters = [];
+async function acquireReadSlot() {
+  const pool = await getReadPool();
+  const free = pool.find((slot) => !slot.busy);
+  if (free) { free.busy = true; return free; }
+  return new Promise((resolve) => readWaiters.push(resolve));
+}
+function releaseReadSlot(slot) {
+  const nextWaiter = readWaiters.shift();
+  if (nextWaiter) nextWaiter(slot); // hand straight to the next request; stays busy
+  else slot.busy = false;
+}
 async function run(sql) {
-  const con = await dbReady;
-  const reader = await con.runAndReadAll(sql);
-  return reader.getRowObjectsJS().map((row) => {
+  const slot = await acquireReadSlot();
+  let rows;
+  try {
+    const reader = await slot.con.runAndReadAll(sql);
+    rows = reader.getRowObjectsJS();
+  } finally {
+    releaseReadSlot(slot);
+  }
+  return rows.map((row) => {
     for (const k of Object.keys(row)) row[k] = toPlain(row[k]);
     return row;
   });
 }
+
+const writeConnReady = dbInstanceReady.then((instance) => instance.connect());
 async function exec(sql) {
-  const con = await dbReady;
+  const con = await writeConnReady;
   await con.run(sql);
 }
 
@@ -68,8 +121,25 @@ async function exec(sql) {
    GP and GP% are derived from SalesTotal-TotalCost, matching the original
    client-side dashboard so every number stays consistent with past exports.
    ============================================================ */
+// A branch is occasionally renamed at the source (legal name change,
+// rebrand) -- mapping the new raw Branch value back to the name already
+// used in sales_history and in any already-imported target keeps that
+// outlet's history/targets continuous instead of silently splitting into
+// two separate "outlets" from the rename date onward. Add an entry here
+// whenever that happens; never needed for a genuinely new outlet.
+//   2026-10: Sahat's branch name in the daily export changed from
+//   "SAHAT AL MADINA -  DEIRA" (used through Dec 2025, and in the imported
+//   Sept 2026 target) to "SAHAT AL MADINA SUPERMARKET (L.L.C)" -- mapped
+//   back to the old name so both periods and the existing target line up.
+const OUTLET_RENAMES = {
+  'SAHAT AL MADINA SUPERMARKET (L.L.C)': 'SAHAT AL MADINA -  DEIRA',
+};
+const outletRenameCaseSql = Object.entries(OUTLET_RENAMES)
+  .map(([from, to]) => `WHEN '${from.replace(/'/g, "''")}' THEN '${to.replace(/'/g, "''")}'`)
+  .join(' ');
+
 const DIM_SQL = {
-  outlet: "COALESCE(NULLIF(TRIM(Branch),''), 'Unknown Outlet')",
+  outlet: `COALESCE(NULLIF(TRIM(CASE TRIM(Branch) ${outletRenameCaseSql} ELSE TRIM(Branch) END),''), 'Unknown Outlet')`,
   category: "COALESCE(NULLIF(TRIM(MainGroupName),''), '(Uncategorized)')",
   class_: "COALESCE(NULLIF(TRIM(SubGroup),''), '(Unclassified)')",
   subclass: "COALESCE(NULLIF(TRIM(Subgroup2),''), '')",

@@ -68,30 +68,47 @@ const DATE_EXPR = (col) => `COALESCE(
 // header row, so pinning these is safe and sidesteps that failure mode.
 async function ingestCsvInto(run, exec, csvPath, targetTable, options = {}) {
   const compressionArg = options.compressed ? `, compression='gzip'` : '';
-  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false`;
-  // ignore_errors + strict_mode=false cover occasional malformed/non-UTF-8
-  // rows in the source export (seen in real data) — they're skipped rather
-  // than failing the whole ingest, consistent with how unparseable trandate
-  // rows are already dropped and reported via `skipped` below.
+  // encoding='latin-1' (not the default utf-8) is the actual fix for a real
+  // silent-data-loss bug found 2026-10: the source export isn't valid UTF-8
+  // -- at least one outlet (Sahat) has a raw single-byte 0xA0 (a Windows
+  // ANSI/cp1252 non-breaking space) embedded in its name. Under utf-8,
+  // read_csv_auto's ignore_errors below treats that whole LINE as malformed
+  // and drops it before it ever reaches `total` -- it was never counted as
+  // `skipped` either, so every one of that outlet's rows vanished with zero
+  // trace all year. latin-1 maps every single byte (0-255) to a valid
+  // character, so this specific failure mode can no longer happen for any
+  // outlet/row, confirmed outlet (Branch) is correct, not just non-crashing.
+  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false, encoding='latin-1'`;
+  // ignore_errors + strict_mode=false cover occasional malformed rows (seen
+  // in real data) -- they're skipped rather than failing the whole ingest,
+  // consistent with how unparseable trandate rows are already dropped and
+  // reported via `skipped` below.
   const desc = await run(`DESCRIBE SELECT * FROM read_csv_auto(${esc(csvPath)}, sample_size=200000, ignore_errors=true${dialectArgs}${compressionArg})`);
   const actualCols = desc.map((d) => d.column_name);
   const r = resolveColumns(actualCols);
   const sel = (canon) => (r[canon] ? `"${r[canon]}"` : 'NULL');
+  // A correctly-decoded non-breaking space (U+00A0, from that same raw 0xA0
+  // byte) still isn't a plain space -- it would sit silently in the middle
+  // of a name like "SAHAT<nbsp>AL<nbsp>MADINA...", never stripped by a
+  // leading/trailing TRIM() at query time, and never equal to the same
+  // outlet typed with normal spaces anywhere else (targets, filters). Every
+  // text column gets it normalized to a plain space at ingest, once, here.
+  const txt = (canon) => `REPLACE(CAST(${sel(canon)} AS VARCHAR), CHR(160), ' ')`;
   const stagingTable = `${targetTable}_staging`;
   await exec(`
     CREATE OR REPLACE TABLE ${stagingTable} AS
     SELECT
       ${DATE_EXPR(`"${r.trandate}"`)} AS trandate,
-      CAST(${sel('Branch')} AS VARCHAR) AS Branch,
-      CAST(${sel('supplier')} AS VARCHAR) AS supplier,
-      CAST(${sel('MainGroupName')} AS VARCHAR) AS MainGroupName,
-      CAST(${sel('SubGroup')} AS VARCHAR) AS SubGroup,
-      CAST(${sel('Subgroup2')} AS VARCHAR) AS Subgroup2,
-      CAST(${sel('groupname')} AS VARCHAR) AS groupname,
-      CAST(${sel('brand')} AS VARCHAR) AS brand,
-      CAST(${sel('itembarcode')} AS VARCHAR) AS itembarcode,
-      CAST(${sel('Description')} AS VARCHAR) AS Description,
-      CAST(${sel('Unit')} AS VARCHAR) AS Unit,
+      ${txt('Branch')} AS Branch,
+      ${txt('supplier')} AS supplier,
+      ${txt('MainGroupName')} AS MainGroupName,
+      ${txt('SubGroup')} AS SubGroup,
+      ${txt('Subgroup2')} AS Subgroup2,
+      ${txt('groupname')} AS groupname,
+      ${txt('brand')} AS brand,
+      ${txt('itembarcode')} AS itembarcode,
+      ${txt('Description')} AS Description,
+      ${txt('Unit')} AS Unit,
       TRY_CAST(${sel('TotalQty')} AS DOUBLE) AS TotalQty,
       TRY_CAST("${r.SalesTotal}" AS DOUBLE) AS SalesTotal,
       TRY_CAST(${sel('TotalCost')} AS DOUBLE) AS TotalCost

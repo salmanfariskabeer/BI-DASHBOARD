@@ -2698,6 +2698,7 @@ const REPORT_DEFS = {
   customdate: { name:'Custom Date Variance',   desc:'Compare any two date ranges you choose — e.g. last week vs the week before. Drillable.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:true },
   aboveavg:   { name:'Above / Below Average',  desc:'Rank everything in a dimension against its own average.', needsDim:true,  needsMetric:true,  needsDate:false, needsCustomDate:false },
   target:     { name:'Target vs Actual',       desc:'Monthly target vs actual till yesterday — pro-rata daily target, achievement %, balance, required per day, day-wise and outlet × day. Import targets in Settings.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:false },
+  weekend:    { name:'Weekend vs Weekdays',     desc:'Each outlet\'s share of sales and margin % on Weekend (Fri-Sun) vs Weekdays (Mon-Thu) for a chosen month, vs the same month last year. Outlet \u2192 class drill-down below.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:false },
 };
 let currentReport = 'sales';
 let lastReportExport = null;
@@ -2885,7 +2886,7 @@ async function renderReportsPage(){
   document.getElementById('reportDateRow').style.display = def.needsDate ? '' : 'none';
   document.getElementById('reportCustomDateRow').style.display = def.needsCustomDate ? '' : 'none';
   document.getElementById('cdvQuickPresets').style.display = def.needsCustomDate ? '' : 'none';
-  document.getElementById('reportTopNRow').style.display = (currentReport==='outlet'||currentReport==='aboveavg'||currentReport==='target') ? 'none' : '';
+  document.getElementById('reportTopNRow').style.display = (currentReport==='outlet'||currentReport==='aboveavg'||currentReport==='target'||currentReport==='weekend') ? 'none' : '';
   const dim = def.needsDim ? (document.getElementById('report_dim').value || 'category') : 'outlet';
   const metric = document.getElementById('report_metric').value || 'sales';
   const outEl = document.getElementById('reportOutput');
@@ -2895,6 +2896,7 @@ async function renderReportsPage(){
     if(currentReport==='customdate'){ await renderCustomDateVariance(outEl, myGen); return; }
     if(currentReport==='aboveavg'){ await renderAboveBelowAverage(outEl, dim, metric, myGen); return; }
     if(currentReport==='target'){ await renderTargetReport(outEl, myGen); return; }
+    if(currentReport==='weekend'){ await renderWeekendReport(outEl, myGen); return; }
 
     const bf = baseFilters();
     const { grand } = await API.aggregate({ filters: bf });
@@ -3434,6 +3436,195 @@ async function renderTargetReport(outEl, myGen){
       { name:'Outlet x Day (AED)', rows:[['Outlet','Daily Target', ...dayKeys, 'Till date'], ...mxExp, ['All outlets', G.daily, ...dayTotals, G.actual]], colTypes:['text', ...Array(dayKeys.length+2).fill('money')] },
     ],
     targetVariants,
+  };
+}
+
+/* ============================================================
+   WEEKEND VS WEEKDAYS — for a chosen month, each outlet's own share of
+   sales (and margin %) that fell on Weekend (Fri/Sat/Sun) vs Weekday
+   (Mon-Thu), vs the same month last year. Outlet summary across the top,
+   outlet -> class drill-down below; both export to CSV/Excel.
+   ============================================================ */
+const WEEKEND_DAYS = ['Fri','Sat','Sun'];
+const WEEKDAY_DAYS = ['Mon','Tue','Wed','Thu'];
+let wkdState = { month: null };
+
+// "pp" = percentage POINTS, already x100 (e.g. 73.97), not the 0..1 fraction
+// fmtPct() elsewhere expects -- kept distinct on purpose so the two never
+// get double-scaled against each other by mistake.
+function ppFmt(v){ return (v==null||!isFinite(v)) ? '—' : v.toFixed(1)+'%'; }
+function ppDiffFmt(v){ return (v==null||!isFinite(v)) ? '—' : (v>=0?'+':'')+v.toFixed(1)+'pt'; }
+function ppDiffCls(v){ return v==null||!isFinite(v) ? '' : (v>=0?'ach-good':'ach-bad'); }
+// Converts a percentage-points value (73.97) to the 0..1 fraction Excel's
+// percent format expects (0.7397) for export -- checking null BEFORE
+// dividing, since `null/100` is 0 in JS, not null, and would otherwise turn
+// a genuinely missing value (e.g. no last-year data) into a misleading 0%.
+function pctFrac(v){ return v==null||!isFinite(v) ? null : v/100; }
+
+// Sales% = this bucket's own share of (weekend+weekday) sales for the same
+// outlet/class -- so Weekend% + Weekday% = 100% by construction. Margin% is
+// gross margin computed only on that bucket's own sales.
+function wkdShareMetrics(wkEndSales, wkEndCost, wkDaySales, wkDayCost){
+  const total = wkEndSales + wkDaySales;
+  const wkEndSharePct = total ? wkEndSales/total*100 : null;
+  const wkDaySharePct = total ? wkDaySales/total*100 : null;
+  const wkEndMarginPct = wkEndSales ? (wkEndSales-wkEndCost)/wkEndSales*100 : null;
+  const wkDayMarginPct = wkDaySales ? (wkDaySales-wkDayCost)/wkDaySales*100 : null;
+  return {
+    wkEndSharePct, wkDaySharePct, wkEndMarginPct, wkDayMarginPct,
+    diffSharePct: (wkEndSharePct!=null && wkDaySharePct!=null) ? wkEndSharePct-wkDaySharePct : null,
+    diffMarginPct: (wkEndMarginPct!=null && wkDayMarginPct!=null) ? wkEndMarginPct-wkDayMarginPct : null,
+    totalSales: total,
+  };
+}
+
+// One period's full weekend/weekday split, at both outlet level (rows) and
+// outlet x class level (cells) -- just 2 aggregate calls total (weekend,
+// weekday), each already a full cross-tab via columnDim, reused for the
+// summary table, the outlet->class drill-down AND the export -- nothing
+// else to fetch afterward, even at export time.
+async function fetchWeekendSplit(periodFilters){
+  const [wkEndRes, wkDayRes] = await Promise.all([
+    API.aggregate({ filters: periodFilters, extra:[{dim:'weekday', values:WEEKEND_DAYS}], groupBy:'outlet', columnDim:'class_', limit:null }),
+    API.aggregate({ filters: periodFilters, extra:[{dim:'weekday', values:WEEKDAY_DAYS}], groupBy:'outlet', columnDim:'class_', limit:null }),
+  ]);
+  const zero = ()=>({wkEndSales:0,wkEndCost:0,wkDaySales:0,wkDayCost:0});
+  const outletMap = new Map(), classMap = new Map();
+  const touch = (map,key)=>{ if(!map.has(key)) map.set(key,zero()); return map.get(key); };
+  for(const r of wkEndRes.rows){ const m=touch(outletMap,r.key); m.wkEndSales=r.sales; m.wkEndCost=r.cost; }
+  for(const r of wkDayRes.rows){ const m=touch(outletMap,r.key); m.wkDaySales=r.sales; m.wkDayCost=r.cost; }
+  for(const c of wkEndRes.cells){ const m=touch(classMap,c.key+'|'+c.colKey); m.wkEndSales=c.sales; m.wkEndCost=c.cost; }
+  for(const c of wkDayRes.cells){ const m=touch(classMap,c.key+'|'+c.colKey); m.wkDaySales=c.sales; m.wkDayCost=c.cost; }
+  return { outletMap, classMap };
+}
+
+async function renderWeekendReport(outEl, myGen){
+  const dataMax = getDataMaxDate();
+  const month = wkdState.month || (dataMax.getFullYear()+'-'+String(dataMax.getMonth()+1).padStart(2,'0'));
+  wkdState.month = month;
+  const [yy,mm] = month.split('-').map(Number);
+  const thisStart = new Date(yy,mm-1,1), thisEnd = new Date(yy,mm,0);
+  const lastYearMonth = (yy-1)+'-'+String(mm).padStart(2,'0');
+  const lastStart = new Date(yy-1,mm-1,1), lastEnd = new Date(yy-1,mm,0);
+  const bf0 = baseFilters(); // respects the top-bar Outlet/Category/Class/Supplier filters
+  const thisFilters = { ...bf0, dateFrom: fmtDate(thisStart), dateTo: fmtDate(thisEnd) };
+  const lastFilters = { ...bf0, dateFrom: fmtDate(lastStart), dateTo: fmtDate(lastEnd) };
+
+  const [ty, ly] = await Promise.all([ fetchWeekendSplit(thisFilters), fetchWeekendSplit(lastFilters) ]);
+  if(myGen!==undefined && myGen!==reportRenderGen) return;
+
+  const zero = {wkEndSales:0,wkEndCost:0,wkDaySales:0,wkDayCost:0};
+  const metricsFor = (raw)=>wkdShareMetrics(raw.wkEndSales,raw.wkEndCost,raw.wkDaySales,raw.wkDayCost);
+  const outlets = [...new Set([...ty.outletMap.keys(), ...ly.outletMap.keys()])];
+  if(outlets.length===0){
+    outEl.innerHTML = '<div class="report-title">Weekend vs Weekdays</div><p class="pivot-note">No sales in this period for the current filters.</p>';
+    lastReportExport = null; return;
+  }
+  const outletRows = outlets.map(o=>({
+    outlet:o, ty: metricsFor(ty.outletMap.get(o)||zero), ly: metricsFor(ly.outletMap.get(o)||zero),
+  })).sort((a,b)=>b.ty.totalSales - a.ty.totalSales);
+
+  const sumRaw = (map)=>{ const s={...zero}; for(const v of map.values()){ s.wkEndSales+=v.wkEndSales; s.wkEndCost+=v.wkEndCost; s.wkDaySales+=v.wkDaySales; s.wkDayCost+=v.wkDayCost; } return s; };
+  const total = { outlet:'TOTAL', ty: metricsFor(sumRaw(ty.outletMap)), ly: metricsFor(sumRaw(ly.outletMap)) };
+
+  // Last 24 months ending at the data's latest month.
+  const monthOptions = [];
+  { let d = new Date(dataMax.getFullYear(), dataMax.getMonth(), 1);
+    for(let i=0;i<24;i++){ monthOptions.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); d=new Date(d.getFullYear(),d.getMonth()-1,1); } }
+
+  let html = `<div class="report-title">Weekend vs Weekdays — ${escapeHtml(monthLabel(month))}</div>`;
+  html += `<div class="pivot-controls tgt-controls">
+    <div class="filter-group"><label>Month</label><select id="wkd_month">${monthOptions.map(m=>`<option value="${m}"${m===month?' selected':''}>${escapeHtml(monthLabel(m))}</option>`).join('')}</select></div>
+  </div>`;
+  html += `<p class="pivot-note">Weekend = Friday, Saturday, Sunday. Weekdays = Monday to Thursday. Sales % is each outlet's (or class's) own share of its total sales in the period, so Weekend % + Weekday % = 100%. Margin % is gross margin on that bucket's own sales. "LY" = ${escapeHtml(monthLabel(lastYearMonth))}.</p>`;
+
+  // ---- Outlet summary: outlets across the top, 6 sub-columns each ----
+  const subHeads = ['Sales% TY','Sales% LY','Sales% Δ','Mar% TY','Mar% LY','Mar% Δ'];
+  const colLabels = [...outletRows.map(r=>r.outlet), 'TOTAL'];
+  let head = '<tr><th class="rowhead" rowspan="2">Metric</th>';
+  for(const lbl of colLabels) head += `<th colspan="6" class="col-group${lbl==='TOTAL'?' total-group':''}">${escapeHtml(lbl)}</th>`;
+  head += '</tr><tr>';
+  for(const lbl of colLabels) for(const s of subHeads) head += `<th class="sub-col${lbl==='TOTAL'?' total-group':''}">${s}</th>`;
+  head += '</tr>';
+
+  const summaryCells = (which)=> (r)=>{
+    let tyShare, lyShare, tyMargin, lyMargin;
+    if(which==='wkEnd'){ tyShare=r.ty.wkEndSharePct; lyShare=r.ly.wkEndSharePct; tyMargin=r.ty.wkEndMarginPct; lyMargin=r.ly.wkEndMarginPct; }
+    else if(which==='wkDay'){ tyShare=r.ty.wkDaySharePct; lyShare=r.ly.wkDaySharePct; tyMargin=r.ty.wkDayMarginPct; lyMargin=r.ly.wkDayMarginPct; }
+    else { tyShare=r.ty.diffSharePct; lyShare=r.ly.diffSharePct; tyMargin=r.ty.diffMarginPct; lyMargin=r.ly.diffMarginPct; }
+    const dShare = (tyShare!=null&&lyShare!=null) ? tyShare-lyShare : null;
+    const dMargin = (tyMargin!=null&&lyMargin!=null) ? tyMargin-lyMargin : null;
+    return { cells:`<td>${ppFmt(tyShare)}</td><td>${ppFmt(lyShare)}</td><td class="${ppDiffCls(dShare)}">${ppDiffFmt(dShare)}</td>`+
+                    `<td>${ppFmt(tyMargin)}</td><td>${ppFmt(lyMargin)}</td><td class="${ppDiffCls(dMargin)}">${ppDiffFmt(dMargin)}</td>`,
+             vals:[tyShare,lyShare,dShare,tyMargin,lyMargin,dMargin] };
+  };
+  const rowDefs = [ ['Weekend Sales (Fri, Sat, Sun)', 'wkEnd'], ['Weekday Sales (Mon to Thu)', 'wkDay'], ['Difference (Weekend − Weekday)', 'diff'] ];
+  const exportHeaders = ['Row','Outlet','Sales% This Year','Sales% Last Year','Sales% Diff (pt)','Margin% This Year','Margin% Last Year','Margin% Diff (pt)'];
+  const exportRows = [];
+  html += '<div class="report-subtitle">Outlet comparison</div>';
+  html += '<div class="tbl-scroll"><table class="pivot tgt-table"><thead>'+head+'</thead><tbody>';
+  for(const [label, which] of rowDefs){
+    const fn = summaryCells(which);
+    html += `<tr><td class="rowhead">${label}</td>`;
+    for(const r of outletRows){
+      const f = fn(r); html += f.cells;
+      exportRows.push([label, r.outlet, ...f.vals.map(pctFrac)]);
+    }
+    const tf = fn(total);
+    html += tf.cells + '</tr>';
+    exportRows.push([label, 'TOTAL', ...tf.vals.map(pctFrac)]);
+  }
+  html += '</tbody></table></div>';
+
+  // ---- Outlet & class drill-down (rows = outlets, expand into classes) ----
+  const drillHead = '<tr><th class="rowhead">Outlet / Class</th>'+
+    '<th colspan="3">Weekend Sales%</th><th colspan="3">Weekend Mar%</th><th colspan="3">Weekday Sales%</th><th colspan="3">Weekday Mar%</th></tr>'+
+    '<tr><th class="rowhead"></th>'+Array(4).fill(['TY','LY','Δ']).flat().map(s=>`<th class="sub-col">${s}</th>`).join('')+'</tr>';
+  const drillCells = (m)=>{
+    const dSE=(m.ty.wkEndSharePct!=null&&m.ly.wkEndSharePct!=null)?m.ty.wkEndSharePct-m.ly.wkEndSharePct:null;
+    const dME=(m.ty.wkEndMarginPct!=null&&m.ly.wkEndMarginPct!=null)?m.ty.wkEndMarginPct-m.ly.wkEndMarginPct:null;
+    const dSD=(m.ty.wkDaySharePct!=null&&m.ly.wkDaySharePct!=null)?m.ty.wkDaySharePct-m.ly.wkDaySharePct:null;
+    const dMD=(m.ty.wkDayMarginPct!=null&&m.ly.wkDayMarginPct!=null)?m.ty.wkDayMarginPct-m.ly.wkDayMarginPct:null;
+    return `<td>${ppFmt(m.ty.wkEndSharePct)}</td><td>${ppFmt(m.ly.wkEndSharePct)}</td><td class="${ppDiffCls(dSE)}">${ppDiffFmt(dSE)}</td>`+
+           `<td>${ppFmt(m.ty.wkEndMarginPct)}</td><td>${ppFmt(m.ly.wkEndMarginPct)}</td><td class="${ppDiffCls(dME)}">${ppDiffFmt(dME)}</td>`+
+           `<td>${ppFmt(m.ty.wkDaySharePct)}</td><td>${ppFmt(m.ly.wkDaySharePct)}</td><td class="${ppDiffCls(dSD)}">${ppDiffFmt(dSD)}</td>`+
+           `<td>${ppFmt(m.ty.wkDayMarginPct)}</td><td>${ppFmt(m.ly.wkDayMarginPct)}</td><td class="${ppDiffCls(dMD)}">${ppDiffFmt(dMD)}</td>`;
+  };
+  const classExportHeaders = ['Outlet','Class','Weekend Sales% TY','Weekend Sales% LY','Weekend Mar% TY','Weekend Mar% LY','Weekday Sales% TY','Weekday Sales% LY','Weekday Mar% TY','Weekday Mar% LY'];
+  const classExportRows = [];
+  html += '<div class="report-subtitle">Outlet &amp; class — click ▸ to see an outlet\'s classes</div>';
+  html += '<div class="tbl-scroll"><table class="pivot tgt-table"><thead>'+drillHead+'</thead><tbody>';
+  for(const r of outletRows){
+    const path = '>>wkd:'+r.outlet;
+    const expanded = reportExpandedPaths.has(path);
+    html += `<tr class="level-0"><td class="rowhead"><span class="expand-toggle" data-path="${escapeAttr(path)}">${expanded?'▾':'▸'}</span>${escapeHtml(r.outlet)}</td>${drillCells(r)}</tr>`;
+    const classKeys = new Set();
+    for(const k of ty.classMap.keys()) if(k.startsWith(r.outlet+'|')) classKeys.add(k.slice(r.outlet.length+1));
+    for(const k of ly.classMap.keys()) if(k.startsWith(r.outlet+'|')) classKeys.add(k.slice(r.outlet.length+1));
+    for(const cls of sortByPriority('class_', [...classKeys])){
+      const key = r.outlet+'|'+cls;
+      const cm = { ty: metricsFor(ty.classMap.get(key)||zero), ly: metricsFor(ly.classMap.get(key)||zero) };
+      if(expanded) html += `<tr class="level-1"><td class="rowhead"><span class="expand-toggle"></span>${escapeHtml(classLabel(cls))}</td>${drillCells(cm)}</tr>`;
+      classExportRows.push([r.outlet, classLabel(cls),
+        pctFrac(cm.ty.wkEndSharePct), pctFrac(cm.ly.wkEndSharePct), pctFrac(cm.ty.wkEndMarginPct), pctFrac(cm.ly.wkEndMarginPct),
+        pctFrac(cm.ty.wkDaySharePct), pctFrac(cm.ly.wkDaySharePct), pctFrac(cm.ty.wkDayMarginPct), pctFrac(cm.ly.wkDayMarginPct)]);
+    }
+  }
+  html += '</tbody></table></div>';
+
+  outEl.innerHTML = html;
+  attachReportRowHandlers();
+  document.getElementById('wkd_month').addEventListener('change', (e)=>{ wkdState.month=e.target.value; renderReportsPage(); });
+
+  const pctTypes = ['percent','percent','percent','percent','percent','percent'];
+  lastReportExport = {
+    headers: exportHeaders, rows: exportRows, grandRow: [],
+    colTypes: ['text','text', ...pctTypes],
+    filename: 'weekend_vs_weekdays_'+month,
+    sheets: [
+      { name:'Outlet Summary', rows:[exportHeaders, ...exportRows], colTypes:['text','text', ...pctTypes] },
+      { name:'Outlet & Class', rows:[classExportHeaders, ...classExportRows], colTypes:['text','text', ...Array(8).fill('percent')] },
+    ],
   };
 }
 
