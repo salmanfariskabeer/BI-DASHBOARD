@@ -3,6 +3,9 @@
 // sales_history). Kept in one place so the two never drift out of sync on
 // column matching or date parsing.
 
+const fs = require('fs');
+const zlib = require('zlib');
+
 const CANONICAL_COLUMNS = [
   'Branch', 'supplier', 'MainGroupName', 'SubGroup', 'Subgroup2', 'groupname',
   'brand', 'itembarcode', 'Description', 'Unit', 'TotalQty', 'SalesTotal', 'TotalCost',
@@ -68,17 +71,17 @@ const DATE_EXPR = (col) => `COALESCE(
 // header row, so pinning these is safe and sidesteps that failure mode.
 async function ingestCsvInto(run, exec, csvPath, targetTable, options = {}) {
   const compressionArg = options.compressed ? `, compression='gzip'` : '';
-  // encoding='latin-1' (not the default utf-8) is the actual fix for a real
-  // silent-data-loss bug found 2026-10: the source export isn't valid UTF-8
-  // -- at least one outlet (Sahat) has a raw single-byte 0xA0 (a Windows
-  // ANSI/cp1252 non-breaking space) embedded in its name. Under utf-8,
-  // read_csv_auto's ignore_errors below treats that whole LINE as malformed
-  // and drops it before it ever reaches `total` -- it was never counted as
-  // `skipped` either, so every one of that outlet's rows vanished with zero
-  // trace all year. latin-1 maps every single byte (0-255) to a valid
-  // character, so this specific failure mode can no longer happen for any
-  // outlet/row, confirmed outlet (Branch) is correct, not just non-crashing.
-  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false, encoding='latin-1'`;
+  // Encoding is detected per file. Some exports are valid UTF-8; others (the
+  // original source export) are cp1252 -- at least one outlet (Sahat) has a
+  // raw single-byte 0xA0 (non-breaking space) in its name, which is invalid
+  // UTF-8. Under utf-8, ignore_errors below drops that whole LINE before it
+  // reaches `total` (never counted as `skipped` either), so every row of that
+  // outlet silently vanished. So: utf-8 only when the file is verifiably valid
+  // UTF-8, otherwise latin-1, which maps every byte to a character and so can
+  // never drop a line. (Hardcoding either one breaks the other kind of file.)
+  const encoding = await detectCsvEncoding(csvPath, !!options.compressed);
+  console.log(`[ingest] ${targetTable}: decoding ${csvPath} as ${encoding}`);
+  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false, encoding='${encoding}'`;
   // ignore_errors + strict_mode=false cover occasional malformed rows (seen
   // in real data) -- they're skipped rather than failing the whole ingest,
   // consistent with how unparseable trandate rows are already dropped and
@@ -119,7 +122,23 @@ async function ingestCsvInto(run, exec, csvPath, targetTable, options = {}) {
   await exec(`CREATE OR REPLACE TABLE ${targetTable} AS SELECT * FROM ${stagingTable} WHERE trandate IS NOT NULL`);
   await exec(`DROP TABLE ${stagingTable}`);
   await exec(`CREATE INDEX IF NOT EXISTS idx_${targetTable}_date ON ${targetTable}(trandate)`);
-  return { total: Number(total), kept: Number(kept), skipped: Number(total) - Number(kept) };
+  return { total: Number(total), kept: Number(kept), skipped: Number(total) - Number(kept), encoding };
+}
+
+// Streams the (optionally gzipped) file through a fatal UTF-8 decoder.
+// Returns 'utf-8' if every byte sequence is valid, else 'latin-1'.
+async function detectCsvEncoding(csvPath, compressed) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  try {
+    let stream = fs.createReadStream(csvPath);
+    if (compressed) stream = stream.pipe(zlib.createGunzip());
+    for await (const chunk of stream) decoder.decode(chunk, { stream: true });
+    decoder.decode();
+    return 'utf-8';
+  } catch (e) {
+    if (e instanceof TypeError || e.code === 'ERR_ENCODING_INVALID_ENCODED_DATA') return 'latin-1';
+    throw e;
+  }
 }
 
 module.exports = { resolveColumns, DATE_EXPR, ingestCsvInto, esc, TABLE_SCHEMA_SQL, CANONICAL_COLUMNS };
