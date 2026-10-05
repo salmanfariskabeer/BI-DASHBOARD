@@ -68,17 +68,15 @@ const DATE_EXPR = (col) => `COALESCE(
 // header row, so pinning these is safe and sidesteps that failure mode.
 async function ingestCsvInto(run, exec, csvPath, targetTable, options = {}) {
   const compressionArg = options.compressed ? `, compression='gzip'` : '';
-  // encoding='latin-1' (not the default utf-8) is the actual fix for a real
-  // silent-data-loss bug found 2026-10: the source export isn't valid UTF-8
-  // -- at least one outlet (Sahat) has a raw single-byte 0xA0 (a Windows
-  // ANSI/cp1252 non-breaking space) embedded in its name. Under utf-8,
-  // read_csv_auto's ignore_errors below treats that whole LINE as malformed
-  // and drops it before it ever reaches `total` -- it was never counted as
-  // `skipped` either, so every one of that outlet's rows vanished with zero
-  // trace all year. latin-1 maps every single byte (0-255) to a valid
-  // character, so this specific failure mode can no longer happen for any
-  // outlet/row, confirmed outlet (Branch) is correct, not just non-crashing.
-  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false, encoding='latin-1'`;
+  // encoding='utf-8' so standard UTF-8 exports load without a decoding error.
+  // NOTE: an earlier version used latin-1 because at least one outlet (Sahat)
+  // had a raw single-byte 0xA0 (cp1252 non-breaking space) in its name, which
+  // is invalid UTF-8; under utf-8, ignore_errors=true drops such a line
+  // before it is counted in `total` or `skipped`. The CHR(160) replacement
+  // below only normalizes a correctly decoded U+00A0 (UTF-8 bytes C2 A0); it
+  // cannot recover a raw 0xA0 byte, so files containing those are still
+  // affected.
+  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false, encoding='utf-8'`;
   // ignore_errors + strict_mode=false cover occasional malformed rows (seen
   // in real data) -- they're skipped rather than failing the whole ingest,
   // consistent with how unparseable trandate rows are already dropped and
