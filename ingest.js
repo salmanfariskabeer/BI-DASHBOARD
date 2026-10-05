@@ -5,6 +5,8 @@
 
 const fs = require('fs');
 const zlib = require('zlib');
+const { Transform } = require('stream');
+const { pipeline } = require('stream/promises');
 
 const CANONICAL_COLUMNS = [
   'Branch', 'supplier', 'MainGroupName', 'SubGroup', 'Subgroup2', 'groupname',
@@ -70,23 +72,29 @@ const DATE_EXPR = (col) => `COALESCE(
 // small. Every export from this source is plain comma-delimited with a
 // header row, so pinning these is safe and sidesteps that failure mode.
 async function ingestCsvInto(run, exec, csvPath, targetTable, options = {}) {
+  // The export is often MIXED: valid UTF-8 text plus stray cp1252 bytes (e.g.
+  // Sahat's raw 0xA0 non-breaking space). Neither utf-8 (ignore_errors silently
+  // drops the whole line, so all of that outlet's rows vanished) nor DuckDB's
+  // strict latin-1 ("File is not latin-1 encoded") handles that. So: if the
+  // file isn't clean UTF-8, transcode it in Node -- valid UTF-8 sequences pass
+  // through, any stray byte is converted from cp1252 -- and hand DuckDB UTF-8.
+  let readPath = csvPath, tmpPath = null, encoding = 'utf-8';
+  if (!(await isValidUtf8(csvPath, !!options.compressed))) {
+    tmpPath = `${csvPath}.utf8.tmp`;
+    await transcodeToUtf8(csvPath, tmpPath, !!options.compressed);
+    readPath = tmpPath;
+    encoding = 'cp1252->utf-8';
+  }
+  console.log(`[ingest] ${targetTable}: ${csvPath} encoding=${encoding}`);
+  options = tmpPath ? { ...options, compressed: false } : options;
   const compressionArg = options.compressed ? `, compression='gzip'` : '';
-  // Encoding is detected per file. Some exports are valid UTF-8; others (the
-  // original source export) are cp1252 -- at least one outlet (Sahat) has a
-  // raw single-byte 0xA0 (non-breaking space) in its name, which is invalid
-  // UTF-8. Under utf-8, ignore_errors below drops that whole LINE before it
-  // reaches `total` (never counted as `skipped` either), so every row of that
-  // outlet silently vanished. So: utf-8 only when the file is verifiably valid
-  // UTF-8, otherwise latin-1, which maps every byte to a character and so can
-  // never drop a line. (Hardcoding either one breaks the other kind of file.)
-  const encoding = await detectCsvEncoding(csvPath, !!options.compressed);
-  console.log(`[ingest] ${targetTable}: decoding ${csvPath} as ${encoding}`);
-  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false, encoding='${encoding}'`;
+  const dialectArgs = `, delim=',', quote='"', escape='"', header=true, strict_mode=false, encoding='utf-8'`;
+  try {
   // ignore_errors + strict_mode=false cover occasional malformed rows (seen
   // in real data) -- they're skipped rather than failing the whole ingest,
   // consistent with how unparseable trandate rows are already dropped and
   // reported via `skipped` below.
-  const desc = await run(`DESCRIBE SELECT * FROM read_csv_auto(${esc(csvPath)}, sample_size=200000, ignore_errors=true${dialectArgs}${compressionArg})`);
+  const desc = await run(`DESCRIBE SELECT * FROM read_csv_auto(${esc(readPath)}, sample_size=200000, ignore_errors=true${dialectArgs}${compressionArg})`);
   const actualCols = desc.map((d) => d.column_name);
   const r = resolveColumns(actualCols);
   const sel = (canon) => (r[canon] ? `"${r[canon]}"` : 'NULL');
@@ -115,7 +123,7 @@ async function ingestCsvInto(run, exec, csvPath, targetTable, options = {}) {
       TRY_CAST(${sel('TotalQty')} AS DOUBLE) AS TotalQty,
       TRY_CAST("${r.SalesTotal}" AS DOUBLE) AS SalesTotal,
       TRY_CAST(${sel('TotalCost')} AS DOUBLE) AS TotalCost
-    FROM read_csv_auto(${esc(csvPath)}, sample_size=200000, ignore_errors=true, all_varchar=false${dialectArgs}${compressionArg})
+    FROM read_csv_auto(${esc(readPath)}, sample_size=200000, ignore_errors=true, all_varchar=false${dialectArgs}${compressionArg})
   `);
   const [{ total }] = await run(`SELECT count(*)::BIGINT AS total FROM ${stagingTable}`);
   const [{ kept }] = await run(`SELECT count(*)::BIGINT AS kept FROM ${stagingTable} WHERE trandate IS NOT NULL`);
@@ -123,22 +131,76 @@ async function ingestCsvInto(run, exec, csvPath, targetTable, options = {}) {
   await exec(`DROP TABLE ${stagingTable}`);
   await exec(`CREATE INDEX IF NOT EXISTS idx_${targetTable}_date ON ${targetTable}(trandate)`);
   return { total: Number(total), kept: Number(kept), skipped: Number(total) - Number(kept), encoding };
+  } finally {
+    if (tmpPath) fs.promises.unlink(tmpPath).catch(() => {});
+  }
 }
 
-// Streams the (optionally gzipped) file through a fatal UTF-8 decoder.
-// Returns 'utf-8' if every byte sequence is valid, else 'latin-1'.
-async function detectCsvEncoding(csvPath, compressed) {
+const CP1252 = (() => {
+  const dec = new TextDecoder('windows-1252');
+  return Array.from({ length: 256 }, (_, i) => Buffer.from(dec.decode(Uint8Array.of(i)), 'utf8'));
+})();
+
+function openSource(p, compressed) {
+  const st = fs.createReadStream(p);
+  return compressed ? st.pipe(zlib.createGunzip()) : st;
+}
+
+async function isValidUtf8(p, compressed) {
   const decoder = new TextDecoder('utf-8', { fatal: true });
   try {
-    let stream = fs.createReadStream(csvPath);
-    if (compressed) stream = stream.pipe(zlib.createGunzip());
-    for await (const chunk of stream) decoder.decode(chunk, { stream: true });
+    for await (const chunk of openSource(p, compressed)) decoder.decode(chunk, { stream: true });
     decoder.decode();
-    return 'utf-8';
+    return true;
   } catch (e) {
-    if (e instanceof TypeError || e.code === 'ERR_ENCODING_INVALID_ENCODED_DATA') return 'latin-1';
+    if (e instanceof TypeError || e.code === 'ERR_ENCODING_INVALID_ENCODED_DATA') return false;
     throw e;
   }
+}
+
+// Length of a valid UTF-8 sequence starting at buf[i], 0 if invalid, -1 if
+// it may be valid but is cut off by the end of the buffer.
+function utf8SeqLen(buf, i) {
+  const b = buf[i];
+  const n = b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 0;
+  if (!n) return 0;
+  for (let k = 1; k < n; k++) {
+    if (i + k >= buf.length) return -1;
+    if ((buf[i + k] & 0xC0) !== 0x80) return 0;
+  }
+  if (b === 0xE0 && buf[i + 1] < 0xA0) return 0;
+  if (b === 0xED && buf[i + 1] > 0x9F) return 0;
+  if (b === 0xF0 && buf[i + 1] < 0x90) return 0;
+  if (b === 0xF4 && buf[i + 1] > 0x8F) return 0;
+  return n;
+}
+
+function mixedToUtf8Transform() {
+  let carry = Buffer.alloc(0);
+  const convert = (buf, final) => {
+    const out = [];
+    let run = 0, i = 0;
+    while (i < buf.length) {
+      if (buf[i] < 0x80) { i++; continue; }
+      const n = utf8SeqLen(buf, i);
+      if (n > 0) { i += n; continue; }
+      if (n < 0 && !final) break;
+      if (i > run) out.push(buf.subarray(run, i));
+      out.push(CP1252[buf[i]]);
+      i++; run = i;
+    }
+    if (i > run) out.push(buf.subarray(run, i));
+    carry = i < buf.length ? Buffer.from(buf.subarray(i)) : Buffer.alloc(0);
+    return Buffer.concat(out);
+  };
+  return new Transform({
+    transform(chunk, _e, cb) { cb(null, convert(Buffer.concat([carry, chunk]), false)); },
+    flush(cb) { cb(null, convert(carry, true)); },
+  });
+}
+
+async function transcodeToUtf8(src, dest, compressed) {
+  await pipeline(openSource(src, compressed), mixedToUtf8Transform(), fs.createWriteStream(dest));
 }
 
 module.exports = { resolveColumns, DATE_EXPR, ingestCsvInto, esc, TABLE_SCHEMA_SQL, CANONICAL_COLUMNS };
