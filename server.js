@@ -32,6 +32,10 @@ const API_KEY = process.env.API_KEY || '';
 // Unset = password sign-in disabled (only the office-location route works).
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 if (!DASHBOARD_PASSWORD) console.warn('DASHBOARD_PASSWORD is not set: password sign-in is disabled.');
+// Password required when signing in from the office (location verified). Never
+// valid from elsewhere; unset = office sign-in is closed (fail closed).
+const OFFICE_PASSWORD = process.env.OFFICE_PASSWORD || '';
+if (!OFFICE_PASSWORD) console.warn('OFFICE_PASSWORD is not set: office sign-in is disabled.');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'warehouse.duckdb');
 const TMP_DIR = path.join(DATA_DIR, 'incoming');
@@ -362,10 +366,10 @@ app.use('/icons', express.static(path.join(PUBLIC_DIR, 'icons')));
 
 // --- Access gate — everything below this line requires it. ---
 // Two ways in, both ending in a signed session cookie:
-//   1. Location: the sign-in page asks the browser for its position; if it
-//      is within ACCESS_RADIUS_M of the office (Al Salem Mall, Jebel Ali),
-//      a LOCATION_SESSION_HOURS session is issued with no password.
-//   2. Password (DASHBOARD_PASSWORD) from anywhere: PASSWORD_SESSION_DAYS.
+//   1. At the office (browser position within ACCESS_RADIUS_M of Al Salem Mall,
+//      Jebel Ali): OFFICE_PASSWORD -> LOCATION_SESSION_HOURS session.
+//   2. Anywhere else: DASHBOARD_PASSWORD -> PASSWORD_SESSION_DAYS session.
+//   Location alone never grants access.
 // A Basic Auth header with the password is still accepted (scripts/curl),
 // but the browser is never sent a Basic challenge any more — it gets the
 // sign-in page instead, since a native prompt would block the location check.
@@ -424,31 +428,41 @@ function noteFailure(ip) {
   else f.count++;
 }
 
-app.post('/api/auth/location', (req, res) => {
-  const lat = Number(req.body && req.body.lat), lng = Number(req.body && req.body.lng);
-  const accuracy = Number(req.body && req.body.accuracy) || 0;
+// Location is only a *check* now -- it never signs anyone in by itself.
+// Being at the office changes which password is required (OFFICE_PASSWORD);
+// anywhere else needs DASHBOARD_PASSWORD.
+function checkOffice(body) {
+  const lat = Number(body && body.lat), lng = Number(body && body.lng);
+  const accuracy = Number(body && body.accuracy) || 0;
   if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
-    return res.status(400).json({ ok: false, error: 'Invalid location' });
+    return { ok: false, reason: 'invalid' };
   }
   const distance = Math.round(distanceMeters(OFFICE, { lat, lng }));
-  if (accuracy > MAX_LOCATION_ACCURACY_M) {
-    return res.status(403).json({ ok: false, distance, accuracy: Math.round(accuracy), reason: 'inaccurate' });
-  }
-  if (distance > ACCESS_RADIUS_M) {
-    return res.status(403).json({ ok: false, distance, accuracy: Math.round(accuracy), reason: 'far' });
-  }
-  setSession(req, res, 'location', LOCATION_SESSION_HOURS * 3600 * 1000);
-  res.json({ ok: true, distance });
+  if (accuracy > MAX_LOCATION_ACCURACY_M) return { ok: false, distance, accuracy: Math.round(accuracy), reason: 'inaccurate' };
+  if (distance > ACCESS_RADIUS_M) return { ok: false, distance, accuracy: Math.round(accuracy), reason: 'far' };
+  return { ok: true, distance };
+}
+
+app.post('/api/auth/location', (req, res) => {
+  res.json(checkOffice(req.body));
 });
 
 app.post('/api/auth/password', (req, res) => {
-  if (tooManyFailures(req.ip)) return res.status(429).json({ ok: false, error: 'Too many wrong attempts — try again in 15 minutes.' });
-  if (!DASHBOARD_PASSWORD || String((req.body && req.body.password) || '') !== DASHBOARD_PASSWORD) {
+  if (tooManyFailures(req.ip)) return res.status(429).json({ ok: false, error: 'Too many wrong attempts \u2014 try again in 15 minutes.' });
+  const pw = String((req.body && req.body.password) || '');
+  const atOffice = checkOffice(req.body).ok;
+  let method = null;
+  if (atOffice) {
+    if (OFFICE_PASSWORD && pw === OFFICE_PASSWORD) method = 'location';
+  } else if (DASHBOARD_PASSWORD && pw === DASHBOARD_PASSWORD) {
+    method = 'password';
+  }
+  if (!method) {
     noteFailure(req.ip);
     return res.status(401).json({ ok: false, error: 'Wrong password.' });
   }
   failedLogins.delete(req.ip);
-  setSession(req, res, 'password', PASSWORD_SESSION_DAYS * 86400 * 1000);
+  setSession(req, res, method, (method === 'location' ? LOCATION_SESSION_HOURS * 3600 : PASSWORD_SESSION_DAYS * 86400) * 1000);
   res.json({ ok: true });
 });
 
