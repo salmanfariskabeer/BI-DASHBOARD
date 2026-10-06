@@ -768,6 +768,50 @@ app.post('/api/aggregate', async (req, res) => {
   }
 });
 
+// Top selling items: consolidated (all outlets in the filter) plus top N per
+// outlet, ranked by quantity or sales value. Honours the same filters as every
+// other report (outlet / category / class / supplier / dates).
+app.post('/api/top-selling', async (req, res) => {
+  try {
+    const { filters, rankBy, limit } = req.body || {};
+    const where = buildWhere(filters);
+    const n = Math.min(500, Math.max(1, parseInt(limit, 10) || 20));
+    const rankExpr = rankBy === 'qty' ? 'SUM(TotalQty)' : 'SUM(SalesTotal)';
+    const item = dimExpr('item'), outlet = dimExpr('outlet');
+    const base = `${where} AND ${item} <> ''`;
+    const [grandRow] = await run(`SELECT ${SUM_SELECT} FROM sales WHERE ${where}`);
+    const consolidated = await run(`
+      SELECT ${item} AS key, ${SUM_SELECT}
+      FROM sales WHERE ${base}
+      GROUP BY key ORDER BY ${rankExpr} DESC, key LIMIT ${n}
+    `);
+    const perOutlet = await run(`
+      SELECT * FROM (
+        SELECT ${outlet} AS outlet, ${item} AS key, ${SUM_SELECT},
+               ROW_NUMBER() OVER (PARTITION BY ${outlet} ORDER BY ${rankExpr} DESC, ${item}) AS rn
+        FROM sales WHERE ${base}
+        GROUP BY outlet, key
+      ) WHERE rn <= ${n} ORDER BY outlet, rn
+    `);
+    const outletTotals = await run(`SELECT ${outlet} AS outlet, ${SUM_SELECT} FROM sales WHERE ${where} GROUP BY outlet ORDER BY SUM(SalesTotal) DESC`);
+    const byOutlet = new Map();
+    for (const r of perOutlet) {
+      if (!byOutlet.has(r.outlet)) byOutlet.set(r.outlet, []);
+      byOutlet.get(r.outlet).push({ key: r.key, ...withDerived(r) });
+    }
+    res.json({
+      grand: withDerived(grandRow),
+      consolidated: consolidated.map((r) => ({ key: r.key, ...withDerived(r) })),
+      outlets: outletTotals.filter((o) => byOutlet.has(o.outlet)).map((o) => ({
+        outlet: o.outlet, total: withDerived(o), rows: byOutlet.get(o.outlet),
+      })),
+    });
+  } catch (err) {
+    console.error('Top-selling error:', err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // HTML must always be re-checked, so a deploy is picked up on the next load.
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, filePath) => { if (filePath.endsWith('.html')) res.set('Cache-Control', 'no-cache'); },

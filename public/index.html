@@ -977,7 +977,9 @@ tr.above-avg td:nth-child(2), tr.below-avg td:nth-child(2){ font-weight:600; }
               <select id="report_metric"></select></div>
             <div class="filter-group" id="reportDateRow"><label>As of Date</label>
               <input type="date" id="report_asof"></div>
-            <div class="filter-group" id="reportTopNRow"><label>Top N per level</label>
+            <div class="filter-group" id="reportRankRow"><label>Top selling by</label>
+              <select id="report_rankby"><option value="qty">Quantity</option><option value="sales">Sales Value</option></select></div>
+            <div class="filter-group" id="reportTopNRow"><label id="reportTopNLabel">Top N per level</label>
               <input type="number" id="report_topn" value="15" min="1" max="500"></div>
             <button class="csv-btn" id="reportCsvBtn">Export report as CSV</button>
             <button class="xlsx-btn" id="reportXlsxBtn">Export report as Excel</button>
@@ -1249,6 +1251,7 @@ const API = {
     return json;
   },
   aggregate(opts){ return API._post('/api/aggregate', opts); },
+  topSelling(opts){ return API._post('/api/top-selling', opts); },
   async distinct(dim, filters, extra){
     const json = await API._post('/api/distinct', { dim, filters, extra });
     return json.values;
@@ -2698,6 +2701,7 @@ const REPORT_DEFS = {
   customdate: { name:'Custom Date Variance',   desc:'Compare any two date ranges you choose — e.g. last week vs the week before. Drillable.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:true },
   aboveavg:   { name:'Above / Below Average',  desc:'Rank everything in a dimension against its own average.', needsDim:true,  needsMetric:true,  needsDate:false, needsCustomDate:false },
   target:     { name:'Target vs Actual',       desc:'Monthly target vs actual till yesterday — pro-rata daily target, achievement %, balance, required per day, day-wise and outlet × day. Import targets in Settings.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:false },
+  topselling: { name:'Top Selling Products', desc:'Best-selling items, consolidated and outlet-wise. Rank by Quantity or by Sales Value; follows the filters above.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:false },
   weekend:    { name:'Weekend vs Weekdays',     desc:'Each outlet\'s share of sales and margin % on Weekend (Fri-Sun) vs Weekdays (Mon-Thu) for a chosen month, vs the same month last year. Outlet \u2192 class drill-down below.', needsDim:false, needsMetric:false, needsDate:false, needsCustomDate:false },
 };
 let currentReport = 'sales';
@@ -2886,6 +2890,8 @@ async function renderReportsPage(){
   document.getElementById('reportDateRow').style.display = def.needsDate ? '' : 'none';
   document.getElementById('reportCustomDateRow').style.display = def.needsCustomDate ? '' : 'none';
   document.getElementById('cdvQuickPresets').style.display = def.needsCustomDate ? '' : 'none';
+  document.getElementById('reportRankRow').style.display = currentReport==='topselling' ? '' : 'none';
+  document.getElementById('reportTopNLabel').textContent = currentReport==='topselling' ? 'Top N items' : 'Top N per level';
   document.getElementById('reportTopNRow').style.display = (currentReport==='outlet'||currentReport==='aboveavg'||currentReport==='target'||currentReport==='weekend') ? 'none' : '';
   const dim = def.needsDim ? (document.getElementById('report_dim').value || 'category') : 'outlet';
   const metric = document.getElementById('report_metric').value || 'sales';
@@ -2897,6 +2903,7 @@ async function renderReportsPage(){
     if(currentReport==='aboveavg'){ await renderAboveBelowAverage(outEl, dim, metric, myGen); return; }
     if(currentReport==='target'){ await renderTargetReport(outEl, myGen); return; }
     if(currentReport==='weekend'){ await renderWeekendReport(outEl, myGen); return; }
+    if(currentReport==='topselling'){ await renderTopSelling(outEl, myGen); return; }
 
     const bf = baseFilters();
     const { grand } = await API.aggregate({ filters: bf });
@@ -2917,6 +2924,48 @@ async function renderReportsPage(){
     outEl.innerHTML = '<p style="padding:20px;color:var(--brick)">Could not build this report. Try adjusting the filters.</p>';
     lastReportExport = null;
   }
+}
+
+/* Top Selling Products: consolidated + per outlet, ranked by Qty or Sales Value */
+async function renderTopSelling(outEl, myGen){
+  const rankBy = document.getElementById('report_rankby').value === 'sales' ? 'sales' : 'qty';
+  const limit = Math.max(1, parseInt(document.getElementById('report_topn').value)||20);
+  const res = await API.topSelling({ filters: baseFilters(), rankBy, limit });
+  if(myGen!==reportRenderGen) return;
+  if(!res.consolidated.length){
+    outEl.innerHTML = '<p style="padding:20px;color:var(--text-dim)">No rows match this report for the current filters.</p>';
+    lastReportExport = null;
+    return;
+  }
+  const rankLabel = rankBy==='qty' ? 'Quantity' : 'Sales Value';
+  const cols = rankBy==='qty' ? ['qty','sales','gp','gppct'] : ['sales','qty','gp','gppct'];
+  const table = (rows, total, totalLabel)=>{
+    let t = '<div class="tbl-scroll"><table class="pivot"><thead><tr><th>#</th><th class="rowhead">Item</th>'
+      + cols.map(m=>'<th>'+escapeHtml(getMetricDef(m).short)+'</th>').join('') + '</tr></thead><tbody>';
+    rows.forEach((r,i)=>{
+      t += `<tr><td>${i+1}</td><td class="rowhead">${escapeHtml(String(r.key))}</td>` + cols.map(m=>`<td>${getMetricDef(m).fmt(r[m])}</td>`).join('') + '</tr>';
+    });
+    t += `<tr class="total-row"><td></td><td class="rowhead">${totalLabel}</td>` + cols.map(m=>`<td>${getMetricDef(m).fmt(total[m])}</td>`).join('') + '</tr>';
+    return t + '</tbody></table></div>';
+  };
+  const exportRows = [];
+  const addExport = (scope, rows)=>rows.forEach((r,i)=>exportRows.push([scope, i+1, String(r.key), ...cols.map(m=>r[m])]));
+
+  let html = `<div class="report-title">Top ${limit} Selling Products by ${rankLabel}</div>`;
+  html += '<div class="report-subtitle">Consolidated \u2014 all selected outlets</div>' + table(res.consolidated, res.grand, 'Total (all items)');
+  addExport('Consolidated', res.consolidated);
+  for(const o of res.outlets){
+    html += `<div class="report-subtitle">${escapeHtml(o.outlet)}</div>` + table(o.rows, o.total, 'Outlet total (all items)');
+    addExport(o.outlet, o.rows);
+  }
+  outEl.innerHTML = html;
+  lastReportExport = {
+    headers: ['Scope', '#', 'Item', ...cols.map(m=>getMetricDef(m).short)],
+    rows: exportRows,
+    grandRow: [],
+    colTypes: ['text','text','text', ...cols.map(m=>getMetricDef(m).type)],
+    filename: 'top_selling_by_'+rankBy,
+  };
 }
 
 /* Sales Report / Margin Comparison: Outlet -> Category -> Class -> Sub-Class -> Item drill-down */
@@ -3904,6 +3953,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 
   document.getElementById('report_dim').addEventListener('change', renderReportsPage);
   document.getElementById('report_metric').addEventListener('change', renderReportsPage);
+  document.getElementById('report_rankby').addEventListener('change', renderReportsPage);
   document.getElementById('report_asof').addEventListener('change', renderReportsPage);
   document.getElementById('reportBackBtn').addEventListener('click', showReportsMenu);
   document.getElementById('report_topn').addEventListener('change', ()=>{
