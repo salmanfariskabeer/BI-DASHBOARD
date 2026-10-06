@@ -776,7 +776,9 @@ app.post('/api/top-selling', async (req, res) => {
     const { filters, rankBy, limit } = req.body || {};
     const where = buildWhere(filters);
     const n = Math.min(500, Math.max(1, parseInt(limit, 10) || 20));
-    const rankExpr = rankBy === 'qty' ? 'SUM(TotalQty)' : 'SUM(SalesTotal)';
+    const rankExpr = rankBy === 'qty' ? 'SUM(TotalQty)'
+      : rankBy === 'gp' ? '(SUM(SalesTotal) - SUM(TotalCost))'
+      : 'SUM(SalesTotal)';
     const item = dimExpr('item'), outlet = dimExpr('outlet');
     const base = `${where} AND ${item} <> ''`;
     const [grandRow] = await run(`SELECT ${SUM_SELECT} FROM sales WHERE ${where}`);
