@@ -250,12 +250,19 @@ defaults to **yesterday** (capped at the last date loaded on the server).
 - KPI cards: month target, target till date, actual till date, achievement %,
   variance, balance for the month, required per day for the remaining days,
   run-rate forecast, and profit (GP) vs profit target.
-- Outlet → class table (with staff and supervisor), a day-wise table
+- Class-wise table first (each class summed over all outlets, ▸ opens it
+  outlet by outlet with staff and supervisor; same columns and formulas as
+  the outlet table), then the Outlet → class table, a day-wise table
   (choose outlet/class) with daily and cumulative achievement, and an
   outlet × day grid.
 - Outlet actuals count only classes that have a target. Sales in other classes
   (e.g. shop consumption) are shown separately and not counted.
-- Excel export gives three sheets: Outlet & Class, Day-wise, Outlet x Day.
+- Excel export gives four sheets: Outlet & Class, Class-wise, Day-wise,
+  Outlet x Day.
+
+**Reports → MTD / YTD** (and Custom Date Variance) show the same Class-wise
+table first (class totals for all outlets, ▸ for outlet-wise, Expand all
+button), then the Outlet-wise drill-down. Excel export has both sheets.
 - Only the top-bar Outlet filter applies; the date, category, class and
   supplier filters don't.
 

@@ -3114,8 +3114,16 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
     return;
   }
 
+  // Class-wise table: one class x outlet cross-tab per period (2 calls total),
+  // fetched alongside the outlet drill-down; expanding a class needs no
+  // further requests.
+  const classResP = Promise.all([
+    API.aggregate({ filters: filtersA, groupBy:'class_', columnDim:'outlet', limit:null }),
+    API.aggregate({ filters: filtersB, groupBy:'class_', columnDim:'outlet', limit:null }),
+  ]);
   const rows = [];
   await buildHierarchyCompareRowsAsync(filtersA, filtersB, [], '', 0, rows);
+  const [classA, classB] = await classResP;
   if(myGen!==undefined && myGen!==reportRenderGen) return;
 
   function variance(curr, prior){
@@ -3124,13 +3132,14 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
     return { diff, pct };
   }
 
+  const tableHead = (firstCol)=> '<thead><tr><th class="rowhead" rowspan="2">'+firstCol+'</th>'
+    + '<th colspan="4" class="col-group">SALES</th><th colspan="4" class="col-group">GROSS PROFIT</th><th colspan="3" class="col-group total-group">GP %</th></tr><tr>'
+    + `<th class="sub-col">${escapeHtml(labelA)}</th><th class="sub-col">${escapeHtml(labelB)}</th><th class="sub-col">Variance</th><th class="sub-col">Variance %</th>`
+    + `<th class="sub-col">${escapeHtml(labelA)}</th><th class="sub-col">${escapeHtml(labelB)}</th><th class="sub-col">Variance</th><th class="sub-col">Variance %</th>`
+    + `<th class="sub-col total-group">${escapeHtml(labelA)}</th><th class="sub-col total-group">${escapeHtml(labelB)}</th><th class="sub-col total-group">Variance (pts)</th>`
+    + '</tr></thead><tbody>';
+
   let html = `<div class="report-title">${title} <span class="report-date-note">(${dateNote})</span></div>`;
-  html += '<table class="pivot"><thead><tr><th class="rowhead" rowspan="2">'+DIM_FIELDS[REPORT_HIERARCHY[0]].label+'</th>';
-  html += '<th colspan="4" class="col-group">SALES</th><th colspan="4" class="col-group">GROSS PROFIT</th><th colspan="3" class="col-group total-group">GP %</th></tr><tr>';
-  html += `<th class="sub-col">${escapeHtml(labelA)}</th><th class="sub-col">${escapeHtml(labelB)}</th><th class="sub-col">Variance</th><th class="sub-col">Variance %</th>`;
-  html += `<th class="sub-col">${escapeHtml(labelA)}</th><th class="sub-col">${escapeHtml(labelB)}</th><th class="sub-col">Variance</th><th class="sub-col">Variance %</th>`;
-  html += `<th class="sub-col total-group">${escapeHtml(labelA)}</th><th class="sub-col total-group">${escapeHtml(labelB)}</th><th class="sub-col total-group">Variance (pts)</th>`;
-  html += '</tr></thead><tbody>';
 
   const exportRows = [];
   const colCount = 12;
@@ -3146,6 +3155,45 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
     h += '</tr>';
     return h;
   }
+  const expVals = (t, p)=>[t.sales, p.sales, t.sales-p.sales, p.sales!==0?(t.sales-p.sales)/p.sales:null,
+    t.gp, p.gp, t.gp-p.gp, p.gp!==0?(t.gp-p.gp)/p.gp:null, t.gppct, p.gppct, t.gppct-p.gppct];
+  const upDownCls = (t, p)=> t.sales-p.sales>=0 ? 'above-avg' : 'below-avg';
+
+  // ---- Class-wise: each class's all-outlet total first, ▸ opens it outlet-wise ----
+  const classAMap = new Map(classA.rows.map(r=>[r.key, r])), classBMap = new Map(classB.rows.map(r=>[r.key, r]));
+  const cellA = new Map(classA.cells.map(c=>[c.key+'|'+c.colKey, c])), cellB = new Map(classB.cells.map(c=>[c.key+'|'+c.colKey, c]));
+  const outletsOfClass = new Map();
+  for(const c of [...classA.cells, ...classB.cells]){
+    if(!outletsOfClass.has(c.key)) outletsOfClass.set(c.key, new Set());
+    outletsOfClass.get(c.key).add(c.colKey);
+  }
+  const classKeys = sortByPriority('class_', [...new Set([...classAMap.keys(), ...classBMap.keys()])]);
+  const classPaths = classKeys.map(k=>'>>cls:'+k);
+  const allClassesOpen = classPaths.length>0 && classPaths.every(p=>reportExpandedPaths.has(p));
+  const classExport = [];
+  html += '<div class="report-subtitle">Class-wise — all outlets (click ▸ for outlet-wise)</div>';
+  html += `<div class="pivot-controls tgt-controls"><button class="layout-btn" id="clsExpandAll">${allClassesOpen?'Collapse all':'Expand all'}</button></div>`;
+  html += '<div class="tbl-scroll"><table class="pivot">'+tableHead('Class / Outlet');
+  for(const cls of classKeys){
+    const t = classAMap.get(cls)||ZERO_SUMS, p = classBMap.get(cls)||ZERO_SUMS;
+    const path = '>>cls:'+cls;
+    const expanded = reportExpandedPaths.has(path);
+    html += rowHtml(classLabel(cls), t, p, 'level-0 '+upDownCls(t,p), `<span class="expand-toggle" data-path="${escapeAttr(path)}">${expanded?'▾':'▸'}</span>`, 0);
+    classExport.push([classLabel(cls), 'All outlets', ...expVals(t,p)]);
+    const outs = [...(outletsOfClass.get(cls)||[])]
+      .map(o=>({ o:String(o), t:cellA.get(cls+'|'+o)||ZERO_SUMS, p:cellB.get(cls+'|'+o)||ZERO_SUMS }))
+      .sort((x,y)=> y.t.sales-x.t.sales || y.p.sales-x.p.sales);
+    for(const x of outs){
+      if(expanded) html += rowHtml(x.o, x.t, x.p, 'level-1 '+upDownCls(x.t,x.p), '<span class="expand-toggle"></span>', 1);
+      classExport.push([classLabel(cls), x.o, ...expVals(x.t,x.p)]);
+    }
+  }
+  html += rowHtml('Grand Total', aGrand, bGrand, 'total-row');
+  html += '</tbody></table></div>';
+
+  // ---- Outlet-wise: Outlet -> Category -> Class -> Sub-Class -> Item drill-down ----
+  html += '<div class="report-subtitle">Outlet-wise</div>';
+  html += '<div class="tbl-scroll"><table class="pivot">'+tableHead(DIM_FIELDS[REPORT_HIERARCHY[0]].label);
   for(const row of rows){
     if(row.isShowMore){
       html += `<tr class="show-more-row" data-showallkey="${escapeAttr(row.showAllKey)}"><td colspan="${colCount}">+ ${row.count} more…</td></tr>`;
@@ -3155,29 +3203,35 @@ async function renderTwoPeriodComparison(outEl, aStart, aEnd, labelA, bStart, bE
       ? `<span class="expand-toggle" data-path="${escapeAttr(row.path)}">${row.expanded?'▾':'▸'}</span>`
       : '<span class="expand-toggle"></span>';
     const itemCls = row.dimKey==='item' ? ' item-row' : '';
-    html += rowHtml(row.label, row.aSums, row.bSums, 'level-'+row.level+itemCls+' '+(row.aSums.sales-row.bSums.sales>=0?'above-avg':'below-avg'), toggle, row.level);
-    exportRows.push(['  '.repeat(row.level)+row.label, row.aSums.sales, row.bSums.sales,
-      row.aSums.sales-row.bSums.sales, row.bSums.sales!==0?(row.aSums.sales-row.bSums.sales)/row.bSums.sales:null,
-      row.aSums.gp, row.bSums.gp, row.aSums.gp-row.bSums.gp, row.bSums.gp!==0?(row.aSums.gp-row.bSums.gp)/row.bSums.gp:null,
-      row.aSums.gppct, row.bSums.gppct, row.aSums.gppct-row.bSums.gppct]);
+    html += rowHtml(row.label, row.aSums, row.bSums, 'level-'+row.level+itemCls+' '+upDownCls(row.aSums,row.bSums), toggle, row.level);
+    exportRows.push(['  '.repeat(row.level)+row.label, ...expVals(row.aSums, row.bSums)]);
   }
   html += rowHtml('Grand Total', aGrand, bGrand, 'total-row');
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
   html += `<p class="report-legend"><span class="legend-dot above"></span> ${escapeHtml(aboveLegend)} &nbsp; <span class="legend-dot below"></span> ${escapeHtml(belowLegend)}</p>`;
-  html += `<p class="pivot-note">Click ▸ to drill from Outlet into Category, Class, Sub-Class, then Item.</p>`;
+  html += `<p class="pivot-note">Class-wise: click ▸ to see a class outlet by outlet. Outlet-wise: click ▸ to drill from Outlet into Category, Class, Sub-Class, then Item.</p>`;
   outEl.innerHTML = html;
   attachReportRowHandlers();
+  document.getElementById('clsExpandAll').addEventListener('click', ()=>{
+    for(const p of classPaths){ if(allClassesOpen) reportExpandedPaths.delete(p); else reportExpandedPaths.add(p); }
+    renderReportsPage();
+  });
 
+  const metricHeads = ['Sales '+labelA,'Sales '+labelB,'Sales Variance','Sales Variance %',
+    'GP '+labelA,'GP '+labelB,'GP Variance','GP Variance %',
+    'GP% '+labelA,'GP% '+labelB,'GP% Variance (pts)'];
+  const metricTypes = ['money','money','money','percent','money','money','money','percent','percent','percent','percent'];
+  const headers = [DIM_FIELDS[REPORT_HIERARCHY[0]].label, ...metricHeads];
+  const grandRow = ['Grand Total', ...expVals(aGrand, bGrand)];
+  const colTypes = ['text', ...metricTypes];
   lastReportExport = {
-    headers: [DIM_FIELDS[REPORT_HIERARCHY[0]].label,
-      'Sales '+labelA,'Sales '+labelB,'Sales Variance','Sales Variance %',
-      'GP '+labelA,'GP '+labelB,'GP Variance','GP Variance %',
-      'GP% '+labelA,'GP% '+labelB,'GP% Variance (pts)'],
-    rows: exportRows,
-    grandRow: ['Grand Total', aGrand.sales, bGrand.sales, aGrand.sales-bGrand.sales, bGrand.sales!==0?(aGrand.sales-bGrand.sales)/bGrand.sales:null,
-      aGrand.gp, bGrand.gp, aGrand.gp-bGrand.gp, bGrand.gp!==0?(aGrand.gp-bGrand.gp)/bGrand.gp:null,
-      aGrand.gppct, bGrand.gppct, aGrand.gppct-bGrand.gppct],
-    colTypes: ['text','money','money','money','percent','money','money','money','percent','percent','percent','percent']
+    headers, rows: exportRows, grandRow, colTypes,
+    // Excel gets both tables: Class-wise flat (Class, Outlet -- the class's
+    // own all-outlet total is the "All outlets" row), then Outlet-wise as shown.
+    sheets: [
+      { name:'Class-wise', rows:[['Class','Outlet', ...metricHeads], ...classExport, ['Grand Total','', ...expVals(aGrand, bGrand)]], colTypes:['text','text', ...metricTypes] },
+      { name:'Outlet-wise', rows:[headers, ...exportRows, grandRow], colTypes },
+    ],
   };
 }
 
@@ -3363,13 +3417,48 @@ async function renderTargetReport(outEl, myGen){
   html += card('Profit (GP) till '+tillLbl, fmtMoney(G.gp), `Target ${fmtMoney(G.tdProfit)} · <span class="${achCls(G.gpAch)}">${fmtPct(G.gpAch)}</span>`, 'green');
   html += '</div>';
 
-  // 5. Outlet / class table.
+  // 5. Class-wise table, then the Outlet / class table -- same columns, same
+  // tgtMetrics() formulas. A class row is that class summed over every
+  // (filtered) outlet that has a target for it; ▸ opens it outlet by outlet.
   const heads = ['Outlet / Class','Month Target','Daily Target','Target till '+tillLbl,'Actual till '+tillLbl,'Ach %','Variance','Month Ach %','Balance to Achieve',`Req./Day (${remaining}d left)`,'Profit Tgt till '+tillLbl,'Actual GP','GP Ach %','Staff','Supervisor'];
+  const headRow = (first)=> '<thead><tr>'+[first, ...heads.slice(1)].map((h,i)=>`<th${i===0||i>=13?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
   const numCells = (m)=> `<td>${fmtMoney(m.st)}</td><td>${fmtMoney(m.daily)}</td><td>${fmtMoney(m.tdTarget)}</td><td><b>${fmtMoney(m.actual)}</b></td>${achTd(m.ach)}${varTd(m.variance)}<td>${fmtPct(m.monthAch)}</td><td>${fmtMoney(Math.max(m.balance,0))}</td><td>${m.reqPerDay!=null?fmtMoney(m.reqPerDay):'—'}</td><td>${fmtMoney(m.tdProfit)}</td><td>${fmtMoney(m.gp)}</td>${achTd(m.gpAch)}`;
-  html += '<div class="report-subtitle">Outlet &amp; class — target vs actual till '+tillLbl+'</div>';
-  html += '<div class="tbl-scroll"><table class="pivot tgt-table"><thead><tr>'+heads.map((h,i)=>`<th${i===0||i>=13?' class="rowhead"':''}>${h}</th>`).join('')+'</tr></thead><tbody>';
-  const expRows = [];
+  const staffCells = (staff, sup)=> `<td class="rowhead tgt-staff" title="${escapeAttr(staff||'')}">${escapeHtml(staff||'')}</td><td class="rowhead tgt-staff">${escapeHtml(sup||'')}</td>`;
+  const achRowCls = (m)=> m.ach!=null ? (m.ach>=1?'above-avg':'below-avg') : '';
   const expRow = (label, m, staff, sup)=>[label, m.st, m.daily, m.tdTarget, m.actual, nz(m.ach), m.variance, nz(m.monthAch), Math.max(m.balance,0), m.reqPerDay, m.tdProfit, m.gp, nz(m.gpAch), staff||'', sup||''];
+
+  const byClass = new Map(); // class -> its target lines, in the outlet table's order
+  for(const o of outlets) for(const c of o.classes){
+    if(!byClass.has(c.class_)) byClass.set(c.class_, []);
+    byClass.get(c.class_).push(c);
+  }
+  const classRows = sortByPriority('class_', [...byClass.keys()]).map(cls=>{
+    const list = byClass.get(cls);
+    const sum = (f)=> list.reduce((s,c)=>s+f(c),0);
+    return { class_:cls, list, m: tgtMetrics(sum(c=>c.sales_target), sum(c=>c.profit_target), sum(c=>c.m.actual), sum(c=>c.m.gp), elapsed, dim) };
+  });
+  const classPaths = classRows.map(r=>'>>tgtc:'+r.class_);
+  const allClassesOpen = classPaths.length>0 && classPaths.every(p=>reportExpandedPaths.has(p));
+  const classExp = [];
+  html += '<div class="report-subtitle">Class-wise — target vs actual till '+tillLbl+' (all outlets; click ▸ for outlet-wise)</div>';
+  html += `<div class="pivot-controls tgt-controls"><button class="layout-btn" id="tgtClsExpandAll">${allClassesOpen?'Collapse all':'Expand all'}</button></div>`;
+  html += '<div class="tbl-scroll"><table class="pivot tgt-table">'+headRow('Class / Outlet');
+  for(const r of classRows){
+    const path = '>>tgtc:'+r.class_;
+    const expanded = reportExpandedPaths.has(path);
+    html += `<tr class="level-0 ${achRowCls(r.m)}"><td class="rowhead"><span class="expand-toggle" data-path="${escapeAttr(path)}">${expanded?'▾':'▸'}</span>${escapeHtml(classLabel(r.class_))}</td>${numCells(r.m)}<td class="rowhead"></td><td class="rowhead"></td></tr>`;
+    classExp.push([classLabel(r.class_), 'All outlets', ...expRow('', r.m).slice(1)]);
+    for(const c of r.list){
+      if(expanded) html += `<tr class="level-1"><td class="rowhead"><span class="expand-toggle"></span>${escapeHtml(c.outlet)}</td>${numCells(c.m)}${staffCells(c.staff, c.supervisor)}</tr>`;
+      classExp.push([classLabel(r.class_), c.outlet, ...expRow('', c.m, c.staff, c.supervisor).slice(1)]);
+    }
+  }
+  html += `<tr class="total-row"><td class="rowhead">Grand Total</td>${numCells(G)}<td></td><td></td></tr>`;
+  html += '</tbody></table></div>';
+
+  html += '<div class="report-subtitle">Outlet &amp; class — target vs actual till '+tillLbl+'</div>';
+  html += '<div class="tbl-scroll"><table class="pivot tgt-table">'+headRow(heads[0]);
+  const expRows = [];
   for(const o of outlets){
     const path = '>>tgt:'+o.outlet;
     const expanded = reportExpandedPaths.has(path);
@@ -3452,6 +3541,10 @@ async function renderTargetReport(outEl, myGen){
   document.getElementById('tgt_dw_outlet').addEventListener('change', (e)=>{ tgtState.dwOutlet=e.target.value; tgtState.dwClass='__all'; rerender(); });
   document.getElementById('tgt_dw_class').addEventListener('change', (e)=>{ tgtState.dwClass=e.target.value; rerender(); });
   document.getElementById('tgt_mx_mode').addEventListener('change', (e)=>{ tgtState.matrixMode=e.target.value; rerender(); });
+  document.getElementById('tgtClsExpandAll').addEventListener('click', ()=>{
+    for(const p of classPaths){ if(allClassesOpen) reportExpandedPaths.delete(p); else reportExpandedPaths.add(p); }
+    rerender();
+  });
 
   const scopeLbl = (tgtState.dwOutlet==='__all'?'All outlets':tgtState.dwOutlet)+(tgtState.dwClass==='__all'?'':' / '+tgtState.dwClass);
   const mainColTypes = ['text','money','money','money','money','percent','money','percent','money','money','money','money','percent','text','text'];
@@ -3482,10 +3575,12 @@ async function renderTargetReport(outEl, myGen){
     grandRow: expRow('Grand Total', G),
     colTypes: mainColTypes,
     filename: 'target_vs_actual_'+month+'_till_'+(elapsed?fmtDate(asOf):'start'),
-    // Day-wise and Outlet x Day are unaffected by the Outlets-only/+Classes
-    // export choice (see targetVariants above) -- they're kept as-is and
-    // appended after whichever Outlet & Class shape gets picked.
+    // Class-wise, Day-wise and Outlet x Day are unaffected by the
+    // Outlets-only/+Classes export choice (see targetVariants above) -- they're
+    // kept as-is and appended after whichever Outlet & Class shape gets picked.
     sheets: [
+      { name:'Class-wise', rows:[['Class','Outlet', ...metricHeads,'Staff','Supervisor'], ...classExp, ['Grand Total','', ...expRow('', G).slice(1)]],
+        colTypes:['text','text', ...metricColTypes,'text','text'] },
       { name:'Day-wise', rows:[['Scope: '+scopeLbl], dwHeads, ...dwExp], colTypes:['text','text','money','money','percent','money','money','money','percent','money','money','percent'], headerRows:2 },
       { name:'Outlet x Day (AED)', rows:[['Outlet','Daily Target', ...dayKeys, 'Till date'], ...mxExp, ['All outlets', G.daily, ...dayTotals, G.actual]], colTypes:['text', ...Array(dayKeys.length+2).fill('money')] },
     ],
